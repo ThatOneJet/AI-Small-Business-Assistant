@@ -1,0 +1,240 @@
+/* ============================================================
+   JetCore design system — tokens + base (ported from the
+   Claude Design handoff: jetcore/project/JetCore.html).
+   OKLCH neutrals, per-app accent hue, dark default + light.
+   ============================================================ */
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+/* Redesign ("Hangar" warm-editorial) faces — Bricolage Grotesque (display),
+   Hanken Grotesk (UI body), JetBrains Mono (numerals). The warm-palette block
+   below (.jc-root, switched by data-theme) references these via --disp/--font/
+   --mono. Legacy Plus Jakarta stays the fallback for old screens. */
+@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  /* per-app accent hue (overridden by [data-app]) */
+  --h: 264;
+  --ac: 0.155; /* accent chroma */
+  --rs: 1; /* radius scale */
+  --accent: oklch(0.66 var(--ac) var(--h));
+  --accent-h: oklch(0.72 calc(var(--ac) + 0.005) var(--h));
+  --accent-d: oklch(0.58 var(--ac) var(--h));
+  --accent-soft: oklch(0.66 var(--ac) var(--h) / 0.14);
+  --accent-line: oklch(0.66 var(--ac) var(--h) / 0.3);
+  --accent-glow: oklch(0.66 var(--ac) var(--h) / 0.45);
+  --accent-ink: oklch(0.99 0.01 var(--h));
+
+  --r-xs: calc(9px * var(--rs)); --r-sm: calc(13px * var(--rs)); --r-md: calc(18px * var(--rs));
+  --r-lg: calc(24px * var(--rs)); --r-xl: calc(32px * var(--rs)); --r-2xl: calc(44px * var(--rs)); --r-pill: 999px;
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px; --sp-7: 48px; --sp-8: 64px;
+
+  --font: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --ease: cubic-bezier(.22, .68, .32, 1);
+  --ease-out: cubic-bezier(.16, 1, .3, 1);
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
+}
+
+/* per-app accent hues — same L/C, hue-shifted for harmony */
+[data-app="hangar"] { --h: 25; } /* red (core) */
+[data-app="devbay"] { --h: 296; } /* violet */
+[data-app="summit"] { --h: 158; } /* emerald */
+[data-app="pylon"]  { --h: 232; } /* sky */
+[data-app="borderless"] { --h: 195; } /* cyan */
+[data-app="forge"] { --h: 40; } /* amber */
+
+/* Re-derive accent tokens from the LOCAL hue on every [data-app] element. */
+[data-app] {
+  --accent: oklch(0.66 var(--ac) var(--h));
+  --accent-h: oklch(0.72 calc(var(--ac) + 0.005) var(--h));
+  --accent-d: oklch(0.58 var(--ac) var(--h));
+  --accent-soft: oklch(0.66 var(--ac) var(--h) / 0.14);
+  --accent-line: oklch(0.66 var(--ac) var(--h) / 0.3);
+  --accent-glow: oklch(0.66 var(--ac) var(--h) / 0.45);
+  --accent-ink: oklch(0.99 0.01 var(--h));
+}
+
+[data-theme="dark"] {
+  --bg: oklch(0.17 0.013 264);
+  --bg-grad: oklch(0.205 0.018 var(--h));
+  --panel: oklch(0.205 0.014 264);
+  --surface: oklch(0.233 0.016 264);
+  --surface-2: oklch(0.268 0.018 264);
+  --surface-3: oklch(0.30 0.02 264);
+  --border: oklch(0.32 0.018 264 / 0.7);
+  --border-2: oklch(0.40 0.02 264 / 0.6);
+  --text: oklch(0.967 0.005 264);
+  --text-2: oklch(0.74 0.014 264);
+  --text-3: oklch(0.585 0.016 264);
+  --shadow-c: 264 30% 4%;
+  --pos: oklch(0.74 0.15 158);
+  --neg: oklch(0.68 0.18 22);
+  --warn: oklch(0.78 0.15 78);
+  --glass: oklch(0.23 0.016 264 / 0.72);
+  /* syntax highlighting (DevBay code viewer) */
+  --code-plain: var(--text-2);
+  --code-com: oklch(0.56 0.025 255);
+  --code-kw: oklch(0.75 0.15 305);
+  --code-str: oklch(0.78 0.13 150);
+  --code-num: oklch(0.80 0.11 65);
+  --code-fn: oklch(0.76 0.12 235);
+  --code-type: oklch(0.83 0.13 100);
+  --code-tag: oklch(0.72 0.16 20);
+  --code-attr: oklch(0.80 0.11 65);
+  --code-punct: var(--text-3);
+}
+[data-theme="light"] {
+  --bg: oklch(0.965 0.007 264);
+  --bg-grad: oklch(0.95 0.02 var(--h));
+  --panel: oklch(0.985 0.005 264);
+  --surface: oklch(1 0 0);
+  --surface-2: oklch(0.975 0.006 264);
+  --surface-3: oklch(0.95 0.008 264);
+  --border: oklch(0.9 0.008 264);
+  --border-2: oklch(0.86 0.01 264);
+  --text: oklch(0.255 0.022 264);
+  --text-2: oklch(0.47 0.022 264);
+  --text-3: oklch(0.62 0.02 264);
+  --shadow-c: 264 30% 50%;
+  --pos: oklch(0.58 0.15 158);
+  --neg: oklch(0.58 0.2 25);
+  --warn: oklch(0.66 0.15 70);
+  --glass: oklch(1 0 0 / 0.7);
+  /* syntax highlighting (DevBay code viewer) */
+  --code-plain: var(--text-2);
+  --code-com: oklch(0.60 0.03 255);
+  --code-kw: oklch(0.48 0.20 305);
+  --code-str: oklch(0.45 0.15 150);
+  --code-num: oklch(0.50 0.13 55);
+  --code-fn: oklch(0.47 0.17 250);
+  --code-type: oklch(0.48 0.13 95);
+  --code-tag: oklch(0.50 0.18 25);
+  --code-attr: oklch(0.50 0.13 55);
+  --code-punct: var(--text-3);
+}
+
+/* ── base (scoped to the JetCore root so it doesn't fight legacy CSS) ── */
+.jc-root { font-family: var(--font); background: var(--bg); color: var(--text); height: 100%; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+.jc-root *, .jc-root *::before, .jc-root *::after { box-sizing: border-box; }
+.jc-root h1, .jc-root h2, .jc-root h3, .jc-root h4, .jc-root p { margin: 0; }
+.jc-root ::selection { background: var(--accent-soft); }
+.jc-root button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+.jc-root input, .jc-root textarea, .jc-root select { font-family: inherit; }
+.jc-root a { color: inherit; text-decoration: none; }
+.mono { font-family: var(--mono); font-feature-settings: "tnum"; }
+
+.jc-root ::-webkit-scrollbar { width: 10px; height: 10px; }
+.jc-root ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
+.jc-root ::-webkit-scrollbar-thumb:hover { background: var(--text-3); background-clip: padding-box; }
+.jc-root ::-webkit-scrollbar-track { background: transparent; }
+
+.tap { transition: transform .18s var(--spring), background .2s var(--ease), box-shadow .25s var(--ease), border-color .2s var(--ease); }
+.tap:active { transform: scale(.96); }
+.jc-root :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@keyframes jc-fade-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes jc-pop { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: scale(1); } }
+@keyframes jc-spin { to { transform: rotate(360deg); } }
+@keyframes jc-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+@keyframes jc-shimmer { 0% { background-position: -340px 0; } 100% { background-position: 340px 0; } }
+@keyframes jc-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+@keyframes jc-bloom { from { opacity: 0; transform: translateY(16px) scale(.82); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .jc-root * { animation-duration: .001ms !important; transition-duration: .05ms !important; }
+}
+
+.skel { background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%); background-size: 680px 100%; animation: jc-shimmer 1.4s infinite linear; border-radius: var(--r-sm); }
+
+.jc-spot { position: relative; }
+.jc-spot::before {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  opacity: var(--sp, 0); transition: opacity .3s var(--ease);
+  background: radial-gradient(var(--spr, 380px) circle at var(--mx) var(--my), color-mix(in oklch, var(--accent) calc(var(--sps, 0.1) * 100%), transparent), transparent 60%);
+}
+.jc-card-hover { transition: transform .3s var(--spring), border-color .25s var(--ease), box-shadow .3s var(--ease); }
+.jc-card-hover:hover { transform: translateY(-3px); border-color: var(--accent-line); box-shadow: 0 1px 2px hsl(var(--shadow-c)/.05), 0 20px 40px -22px hsl(var(--shadow-c)/.5); }
+.jc-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.jc-iconbtn:hover { background: var(--surface-2); color: var(--text); }
+.jc-btn:hover { filter: brightness(1.05); }
+
+/* chart entrance keyframes */
+@keyframes jc-bargrow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes jc-grow { from { width: 0; } }
+@keyframes jc-dashin { from { stroke-dasharray: 0 9999; } }
+
+/* frameless-window drag regions */
+.drag { -webkit-app-region: drag; }
+.no-drag, .drag button, .drag input, .drag kbd { -webkit-app-region: no-drag; }
+
+/* ============================================================
+   REDESIGN — "Hangar" warm-editorial palette (Wave 1).
+   Ported VERBATIM from the Claude Design handoff (JetCore.dc.html
+   lines 16–59). Scoped to `.jc-redesign` so it only repaints the
+   new briefing-first shell + spaces — legacy surfaces (entry,
+   settings, walkthrough) keep the original cool tokens above.
+   Switched by [data-theme] on <html> (set by applyTheme()).
+   ============================================================ */
+.jc-redesign {
+  --font: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --disp: "Bricolage Grotesque", var(--font);
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --ease: cubic-bezier(.22, .68, .32, 1);
+  --spring: cubic-bezier(.34, 1.4, .5, 1);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+[data-theme="dark"] .jc-redesign {
+  --bg: oklch(0.165 0.014 264); --bg-2: oklch(0.195 0.015 264);
+  --card: oklch(0.218 0.016 264); --card-2: oklch(0.255 0.018 264); --card-3: oklch(0.30 0.02 264);
+  --line: oklch(0.36 0.018 264 / 0.6); --line-2: oklch(0.44 0.02 264 / 0.5);
+  --ink: oklch(0.965 0.008 264); --ink-2: oklch(0.75 0.014 264); --ink-3: oklch(0.575 0.016 264);
+  --shadow: 0 30px 60px -30px oklch(0.1 0.02 264 / 0.7);
+  --pos: oklch(0.74 0.15 150); --neg: oklch(0.7 0.18 25); --warn: oklch(0.81 0.14 80);
+  --glass: oklch(0.2 0.016 264 / 0.82);
+}
+[data-theme="light"] .jc-redesign {
+  --bg: oklch(0.965 0.007 264); --bg-2: oklch(0.945 0.009 264);
+  --card: oklch(0.995 0.003 264); --card-2: oklch(0.975 0.006 264); --card-3: oklch(0.95 0.008 264);
+  --line: oklch(0.9 0.008 264); --line-2: oklch(0.84 0.011 264);
+  --ink: oklch(0.255 0.022 264); --ink-2: oklch(0.47 0.022 264); --ink-3: oklch(0.62 0.02 264);
+  --shadow: 0 26px 50px -28px oklch(0.5 0.04 264 / 0.4);
+  --pos: oklch(0.56 0.15 150); --neg: oklch(0.56 0.2 27); --warn: oklch(0.64 0.15 72);
+  --glass: oklch(0.99 0.006 92 / 0.82);
+}
+.jc-redesign, .jc-redesign * { box-sizing: border-box; }
+.jc-redesign .disp { font-family: var(--disp); font-weight: 700; letter-spacing: -0.02em; }
+.jc-redesign .mono { font-family: var(--mono); font-feature-settings: "tnum"; }
+.jc-redesign button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+.jc-redesign input, .jc-redesign textarea { font-family: inherit; }
+.jc-redesign ::selection { background: var(--ink); color: var(--bg); }
+.jc-redesign ::-webkit-scrollbar { width: 11px; height: 11px; }
+.jc-redesign ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; border: 3px solid transparent; background-clip: padding-box; }
+.jc-redesign ::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; }
+.jc-redesign .tap { transition: transform .16s var(--spring), box-shadow .25s var(--ease), border-color .2s var(--ease); }
+.jc-redesign .tap:active { transform: scale(.975); }
+.jc-redesign .lift { transition: transform .22s var(--spring), box-shadow .28s var(--ease), border-color .2s var(--ease); }
+.jc-redesign .lift:hover { transform: translateY(-4px); box-shadow: var(--shadow); }
+.jc-redesign .rise { animation: jcr-rise .5s var(--ease) both; }
+.jc-redesign .pop { animation: jcr-pop .35s var(--spring) both; }
+@keyframes jcr-rise { from { transform: translateY(12px); } to { transform: translateY(0); } }
+@keyframes jcr-pop { from { transform: scale(.92); } to { transform: scale(1); } }
+@keyframes jcr-spin { to { transform: rotate(360deg); } }
+
+/* Hangar radar — the dominant alert pip pulses; the core sweeps a faint ping ring */
+@keyframes jc-radar-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: .65; }
+}
+.jc-radar-pulse { animation: jc-radar-pulse 1.5s ease-in-out infinite; transform-origin: center; }
+@keyframes jc-radar-sweep {
+  0% { opacity: .55; transform: scale(.92); }
+  70% { opacity: 0; transform: scale(1.18); }
+  100% { opacity: 0; transform: scale(1.18); }
+}
+.jc-radar-sweep { animation: jc-radar-sweep 2.6s ease-out infinite; }
+
+/* Pylon compact assignment rows (redesign) */
+.jc-redesign .jc-arow:hover { background: var(--card-2); }
+.jc-redesign .jc-arow:last-child { border-bottom: none; }

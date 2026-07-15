@@ -1,0 +1,22 @@
+[package]
+name = "pairing"
+version = "0.1.0"
+edition = "2021"
+description = "Peer pairing / trust establishment (PSK + Noise keys) for JetCore Borderless."
+
+[dependencies]
+protocol.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+snow.workspace = true
+# Argon2id is used to derive the 32-byte Noise PSK from the human-entered
+# pairing secret deterministically (fixed salt + fixed params => both machines
+# derive the same PSK). Pinned to the latest stable 0.5 line.
+argon2 = "0.5"
+
+[dev-dependencies]
+tempfile = "3"

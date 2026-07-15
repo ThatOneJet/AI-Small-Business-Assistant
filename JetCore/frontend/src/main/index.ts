@@ -1,0 +1,614 @@
+/**
+ * Decks — main process entry.
+ *
+ * Owns: the frameless window, native WebContentsView panels (via PanelManager),
+ * every IPC handler declared in @shared/ipc, JSON persistence, and the
+ * process-lifecycle registry + safe cleanup.
+ */
+import { app, shell, BrowserWindow, ipcMain, dialog, screen } from 'electron'
+import * as electron from 'electron'
+import { join } from 'path'
+import { appendFileSync, watchFile, writeFile } from 'fs'
+import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { IPC } from '@shared/ipc'
+import type {
+  PanelCreatePayload,
+  PanelNavigatePayload,
+  PanelSetBoundsPayload,
+  PanelShowOnlyPayload,
+  PanelTearOffPayload,
+  MetricsResult,
+  FeedbackPayload,
+  FileSavePayload,
+  FileSaveResult
+} from '@shared/ipc'
+import type {
+  HoverShowPayload,
+  SettingsApplyPayload,
+  MenuShowPayload,
+  MenuPickPayload,
+  MiniPlayerControlEvent,
+  FocusPanelEvent
+} from '@shared/ipc'
+import type { PanelId, PersistedState } from '@shared/types'
+import { PanelManager, CHROME_UA } from './panels'
+import { loadState, saveState } from './persistence'
+import { submitFeedback } from './feedback'
+import { killTrackedChildren } from './lifecycle'
+import { createOverlay, type OverlayController } from './overlay'
+import { registerProviderIpc } from './providers/registry'
+import { registerAllProviders } from './providers'
+import { startCodeServer, stopCodeServer } from './codeserver'
+import { initAutoUpdate } from './updater'
+import { pylonConnect, pylonStatus, pylonFetch, pylonDisconnect, pylonApi } from '@pylon/pylon'
+import { devbayConnect, devbayStatus, devbayFetch, devbayDisconnect, devbayDraftRelease, devbayApi } from '@devbay/devbay'
+import { registerDevBayOverlay, hideDevBayOverlay, destroyDevBayOverlay } from '@devbay/devbay-overlay'
+import {
+  setOperationsWindow,
+  startOperations,
+  preloadOperations,
+  summitApi,
+  summitUpload,
+  summitAccount,
+  showOperations,
+  hideOperations,
+  stopOperations,
+  flushOperations,
+  forwardOperationsExit
+} from './apps/summit/jetcore'
+import type { CodeServerResult, OperationsBoundsPayload, SummitApiPayload, SummitUploadPayload, PylonApiPayload, DevBayApiPayload, BorderlessConfigPayload } from '@shared/ipc'
+import {
+  startBorderless,
+  stopBorderless,
+  getBorderlessState,
+  setBorderlessConfig,
+  pairBorderless,
+  unpairBorderless,
+  setBorderlessSender
+} from './apps/borderless/borderless'
+import type { AuthLoginPayload, AuthSignupPayload } from '@shared/ipc'
+import { login as authLogin, signup as authSignup, logout as authLogout, status as authStatus, operationsSeed } from './auth'
+import type { CloudAuthPayload, CloudRecoverPayload, VaultSetPayload } from '@shared/ipc'
+import {
+  signUp as cloudSignUp,
+  signIn as cloudSignIn,
+  signOut as cloudSignOut,
+  status as cloudStatus,
+  unlockWithRecovery as cloudRecover,
+  vaultGet,
+  vaultSet
+} from './vault'
+
+/**
+ * Cap the number of Chromium renderer processes. NOTE this counts ALL renderers,
+ * including the app's own main window + the overlay window. When this cap is hit,
+ * Chromium SILENTLY refuses to spawn a renderer for a new WebContentsView, so the
+ * deck never loads (this caused embedded decks to come up blank / ERR_ABORTED).
+ * So the cap must stay well clear of the working set. The real RAM control is the
+ * discard manager + PanelManager's own live-panel soft cap (which proactively
+ * evicts the least-recently-used HIDDEN deck before creating a new one), so the
+ * active deck always gets a renderer. Keep this ceiling generous.
+ */
+const RENDERER_PROCESS_LIMIT = 64
+app.commandLine.appendSwitch('renderer-process-limit', String(RENDERER_PROCESS_LIMIT))
+
+let mainWindow: BrowserWindow | null = null
+let overlay: OverlayController | null = null
+const panels = new PanelManager()
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    title: 'JetCore',
+    width: 1280,
+    height: 820,
+    minWidth: 940,
+    minHeight: 600,
+    // Show immediately on the dark background — never depend solely on
+    // ready-to-show (a missed event would leave the window hidden forever).
+    show: true,
+    // `frame: false` alone = clean frameless (our CSS draws the titlebar + window
+    // controls). NOTE: do NOT also set `titleBarStyle: 'hidden'` — on Windows that
+    // combo reserves a caption inset at the top, pushing the whole topbar down.
+    frame: false,
+    backgroundColor: '#0e0e13',
+    icon: join(__dirname, '../../build/icon.png'),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true
+    }
+  })
+
+  // Keep the OS window title as "JetCore" regardless of any page <title>.
+  mainWindow.on('page-title-updated', (e) => e.preventDefault())
+
+  panels.setWindow(mainWindow)
+  setOperationsWindow(mainWindow)
+  overlay = createOverlay(mainWindow)
+  // Borderless pushes live peer/cursor events to the renderer.
+  setBorderlessSender((channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
+  })
+
+  // Bridge the corner mini-player (owned by PanelManager) to the overlay window's
+  // control bar. PanelManager decides WHEN (corner/teardown); these hooks draw it.
+  panels.setMiniPlayerHooks({
+    onStart: (rect, meta, collapsed, edge) => overlay?.showMiniPlayer(rect, meta, collapsed, edge),
+    onUpdate: (meta) => overlay?.updateMiniPlayer(meta),
+    onLevels: (levels) => overlay?.updateMiniLevels(levels),
+    onEnd: () => overlay?.hideMiniPlayer()
+  })
+
+  mainWindow.on('ready-to-show', () => mainWindow?.show())
+
+  // TEMP DIAGNOSTIC: capture layout rects the renderer logs on collapse, to a
+  // file we can inspect. Removed once the collapse bug is fixed.
+  mainWindow.webContents.on('console-message', (_e, _level, message) => {
+    if (typeof message === 'string' && message.startsWith('DECKS_LAYOUT::')) {
+      try {
+        appendFileSync(
+          join(app.getPath('temp'), 'decks-layout-debug.log'),
+          `${new Date().toISOString()} ${message.slice(14)}\n`
+        )
+      } catch {
+        /* ignore */
+      }
+    }
+  })
+
+  // Keep the floating mini-player up when Decks is minimized with music playing.
+  mainWindow.on('minimize', () => panels.onWindowMinimized())
+  mainWindow.on('restore', () => panels.onWindowRestored())
+  mainWindow.on('show', () => panels.onWindowRestored())
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    // The overlay (and any login/popup) are always-on-top helper windows that
+    // would otherwise keep the app — and its audible decks — alive after the main
+    // window is gone (window-all-closed never fires while they're open). Closing
+    // the main window means "quit": tear everything down and exit so music stops.
+    cleanup()
+    if (process.platform !== 'darwin') app.quit()
+  })
+
+  // The host renderer page itself never spawns windows; route any externally.
+  mainWindow.webContents.setWindowOpenHandler((details) => {
+    shell.openExternal(details.url)
+    return { action: 'deny' }
+  })
+
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+
+  // Belt-and-suspenders: guarantee the window is visible and focused even if
+  // ready-to-show is missed or the renderer is slow to paint.
+  mainWindow.show()
+  mainWindow.focus()
+
+  // ── Dev auto-refresh ──
+  // electron-vite already HMRs the renderer and restarts on main changes, but the
+  // embedded deck web views don't reload on HMR. After finishing an update we
+  // `touch` <projectRoot>/dev-reload; this hard-reloads the window AND every deck
+  // so the running dev app shows the latest without the user closing it.
+  if (is.dev) {
+    try {
+      const sentinel = join(process.cwd(), 'dev-reload')
+      watchFile(sentinel, { interval: 600 }, () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return
+        mainWindow.webContents.reloadIgnoringCache()
+        panels.reloadAll()
+      })
+    } catch {
+      /* dev-only convenience — ignore if unavailable */
+    }
+  }
+}
+
+/** Register every IPC handler from the contract. Call once on ready. */
+function registerIpc(): void {
+  // ── Window controls (renderer → main, send) ──
+  ipcMain.on(IPC.WindowMinimize, () => mainWindow?.minimize())
+  ipcMain.on(IPC.WindowMaximize, () => {
+    if (!mainWindow) return
+    if (mainWindow.isMaximized()) mainWindow.unmaximize()
+    else mainWindow.maximize()
+  })
+  ipcMain.on(IPC.WindowClose, () => mainWindow?.close())
+
+  // ── Panel lifecycle (renderer → main, invoke) ──
+  ipcMain.handle(IPC.PanelCreate, (_e, p: PanelCreatePayload) => {
+    panels.create(p)
+  })
+  ipcMain.handle(IPC.PanelDestroy, (_e, panelId: PanelId) => {
+    panels.destroy(panelId)
+  })
+  ipcMain.handle(IPC.PanelNavigate, (_e, p: PanelNavigatePayload) => {
+    panels.navigate(p)
+  })
+  ipcMain.handle(IPC.PanelReload, (_e, panelId: PanelId) => {
+    panels.reload(panelId)
+  })
+  ipcMain.handle(IPC.PanelSignIn, (_e, panelId: PanelId) => {
+    panels.openSignIn(panelId)
+  })
+  ipcMain.handle(IPC.PanelGoBack, (_e, panelId: PanelId) => {
+    panels.goBack(panelId)
+  })
+  ipcMain.handle(IPC.PanelGoForward, (_e, panelId: PanelId) => {
+    panels.goForward(panelId)
+  })
+  ipcMain.handle(IPC.PanelSetBounds, (_e, p: PanelSetBoundsPayload) => {
+    panels.setBounds(p)
+  })
+  ipcMain.handle(IPC.PanelShowOnly, (_e, p: PanelShowOnlyPayload) => {
+    panels.showOnly(p)
+  })
+  ipcMain.handle(IPC.PanelHideAll, () => {
+    panels.hideAll()
+  })
+  ipcMain.handle(IPC.PanelSetKeepAlive, (_e, panelId: PanelId, keepAlive: boolean) => {
+    panels.setKeepAlive(panelId, keepAlive)
+  })
+  ipcMain.handle(IPC.PanelTearOff, (_e, p: PanelTearOffPayload) => {
+    panels.tearOff(p)
+  })
+
+  // ── Native deck providers (renderer → main, invoke) ──
+  // Wires provider:connect/fetch/disconnect/status to the provider registry.
+  registerProviderIpc()
+
+  // ── code-server (local VS Code in a web deck) — renderer → main (invoke) ──
+  ipcMain.handle(IPC.CodeServerStart, async (): Promise<CodeServerResult> => {
+    if (!mainWindow) return { error: 'No window' }
+    const picked = await dialog.showOpenDialog(mainWindow, {
+      title: 'Open folder in code-server',
+      properties: ['openDirectory']
+    })
+    if (picked.canceled || !picked.filePaths[0]) return { cancelled: true }
+    try {
+      const { url } = await startCodeServer(picked.filePaths[0])
+      return { url }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { error: message, notInstalled: /not installed/i.test(message) }
+    }
+  })
+  ipcMain.handle(IPC.CodeServerStop, () => {
+    stopCodeServer()
+  })
+
+  // ── JetCore Operations (embedded Flask app, full-area WebContentsView) ──
+  ipcMain.handle(IPC.OperationsStart, () => startOperations())
+  ipcMain.handle(IPC.OperationsPreload, () => preloadOperations())
+  ipcMain.handle(IPC.SummitApi, (_e, p: SummitApiPayload) => summitApi(p))
+  ipcMain.handle(IPC.SummitUpload, (_e, p: SummitUploadPayload) => summitUpload(p))
+  ipcMain.handle(IPC.SummitAccount, () => summitAccount())
+  // This machine's real monitors (Borderless layout) — straight from the OS.
+  ipcMain.handle(IPC.BorderlessStart, (_e, cfg: BorderlessConfigPayload) => startBorderless(cfg))
+  ipcMain.handle(IPC.BorderlessStop, () => stopBorderless())
+  ipcMain.handle(IPC.BorderlessState, () => getBorderlessState())
+  ipcMain.handle(IPC.BorderlessConfig, (_e, cfg: BorderlessConfigPayload) => setBorderlessConfig(cfg))
+  ipcMain.handle(IPC.BorderlessPair, (_e, id: string) => pairBorderless(id))
+  ipcMain.handle(IPC.BorderlessUnpair, (_e, id: string) => unpairBorderless(id))
+  ipcMain.handle(IPC.Displays, () => {
+    const primaryId = screen.getPrimaryDisplay().id
+    return screen.getAllDisplays().map((d) => ({
+      id: d.id,
+      label: d.label || '',
+      x: d.bounds.x,
+      y: d.bounds.y,
+      width: d.bounds.width,
+      height: d.bounds.height,
+      scaleFactor: d.scaleFactor,
+      internal: d.internal,
+      primary: d.id === primaryId,
+      rotation: d.rotation
+    }))
+  })
+  ipcMain.handle(IPC.CursorPoint, () => {
+    const p = screen.getCursorScreenPoint()
+    return { x: p.x, y: p.y }
+  })
+  ipcMain.handle(IPC.OperationsShow, (_e, p: OperationsBoundsPayload) => showOperations(p))
+  ipcMain.handle(IPC.OperationsHide, () => hideOperations())
+  ipcMain.handle(IPC.OperationsStop, () => stopOperations())
+  // The Operations view's preload asks to return to Decks → flip the main renderer.
+  ipcMain.on(IPC.OperationsRequestDecks, () => forwardOperationsExit())
+
+  // ── JetCore account auth (renderer → main, invoke) ──
+  ipcMain.handle(IPC.AuthLogin, (_e, p: AuthLoginPayload) => authLogin(p))
+  ipcMain.handle(IPC.AuthSignup, (_e, p: AuthSignupPayload) => authSignup(p))
+  ipcMain.handle(IPC.AuthLogout, () => authLogout())
+  ipcMain.handle(IPC.AuthStatus, () => authStatus())
+  // SYNC: the Operations preload reads the JetCore session seed before the page's
+  // bundle runs, so Operations is already logged in (no separate login sequence).
+  ipcMain.on(IPC.AuthOperationsBootstrap, (e) => {
+    e.returnValue = operationsSeed()
+  })
+
+  // ── Supabase cloud account + E2EE vault (renderer → main, invoke) ──
+  // All crypto runs in main; the renderer never sees the client/keys, only
+  // status (and, once on signup, the recovery key) or decrypted plaintext.
+  ipcMain.handle(IPC.CloudSignUp, (_e, p: CloudAuthPayload) => cloudSignUp(p.email, p.password))
+  ipcMain.handle(IPC.CloudSignIn, (_e, p: CloudAuthPayload) => cloudSignIn(p.email, p.password))
+  ipcMain.handle(IPC.CloudSignOut, async () => {
+    // Account isolation: flush the outgoing account's Operations data while its DEK
+    // is still unlocked, then stop the backend so it re-binds to whoever signs in
+    // next (otherwise a second account in the same session would see the first's
+    // Summit data via the still-running, first-account-bound backend).
+    await flushOperations()
+    stopOperations()
+    return cloudSignOut()
+  })
+  ipcMain.handle(IPC.CloudStatus, () => cloudStatus())
+  ipcMain.handle(IPC.CloudRecover, (_e, p: CloudRecoverPayload) =>
+    cloudRecover(p.recoveryKey, p.newPassword)
+  )
+  ipcMain.handle(IPC.VaultSet, (_e, p: VaultSetPayload) => vaultSet(p.key, p.plaintext))
+  ipcMain.handle(IPC.VaultGet, (_e, key: string) => vaultGet(key))
+
+  // ── Pylon (Canvas) — token stays in main; renderer gets only data ──
+  ipcMain.handle(IPC.PylonConnect, (_e, p: { baseUrl: string; token: string }) =>
+    pylonConnect(p.baseUrl, p.token)
+  )
+  ipcMain.handle(IPC.PylonStatus, () => pylonStatus())
+  ipcMain.handle(IPC.PylonFetch, () => pylonFetch())
+  ipcMain.handle(IPC.PylonDisconnect, () => pylonDisconnect())
+  ipcMain.handle(IPC.PylonApi, (_e, p: PylonApiPayload) => pylonApi(p))
+
+  // ── DevBay (GitHub) — token stays in main; renderer gets only data ──
+  ipcMain.handle(IPC.DevBayConnect, (_e, token: string) => devbayConnect(token))
+  ipcMain.handle(IPC.DevBayStatus, () => devbayStatus())
+  ipcMain.handle(IPC.DevBayFetch, () => devbayFetch())
+  ipcMain.handle(IPC.DevBayDisconnect, () => devbayDisconnect())
+  ipcMain.handle(
+    IPC.DevBayDraftRelease,
+    (_e, p: { fullName: string; tag: string; name: string; body: string }) =>
+      devbayDraftRelease(p.fullName, p.tag, p.name, p.body)
+  )
+  ipcMain.handle(IPC.DevBayApi, (_e, p: DevBayApiPayload) => devbayApi(p))
+  ipcMain.on(IPC.DevBayOverlayHide, () => hideDevBayOverlay())
+
+  // ── Persistence (renderer → main, invoke) ──
+  ipcMain.handle(IPC.StateLoad, (): Promise<PersistedState | null> => loadState())
+  ipcMain.handle(IPC.StateSave, (_e, state: PersistedState): Promise<void> => saveState(state))
+
+  // ── In-app feedback (suggestion/bug → GitHub issue, or queued offline) ──
+  ipcMain.handle(IPC.FeedbackSubmit, (_e, p: FeedbackPayload) => submitFeedback(p))
+
+  // ── Save a generated file to disk (e.g. a Notes HTML export) ──
+  ipcMain.handle(IPC.FileSave, async (_e, p: FileSavePayload): Promise<FileSaveResult> => {
+    if (!mainWindow) return { ok: false, error: 'No window' }
+    try {
+      const picked = await dialog.showSaveDialog(mainWindow, {
+        title: p.title ?? 'Save file',
+        defaultPath: p.defaultName,
+        filters: p.filters ?? [{ name: 'All files', extensions: ['*'] }]
+      })
+      if (picked.canceled || !picked.filePath) return { ok: false, canceled: true }
+      const target = picked.filePath
+      await new Promise<void>((resolve, reject) => {
+        writeFile(target, p.contents, 'utf-8', (err) => (err ? reject(err) : resolve()))
+      })
+      return { ok: true, path: target }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  // ── Process metrics (renderer → main, invoke) ──
+  ipcMain.handle(IPC.MetricsGet, (): MetricsResult => {
+    // Sum workingSetSize (KB) across every app process → MB.
+    let kb = 0
+    for (const m of app.getAppMetrics()) kb += m.memory?.workingSetSize ?? 0
+    return {
+      ramMB: Math.round(kb / 1024),
+      liveRenderers: panels.liveCount,
+      discarded: panels.discardedCount
+    }
+  })
+  // Real per-deck memory for the Memory panel's per-deck list.
+  ipcMain.handle(IPC.PanelMetricsGet, () => panels.panelMetrics())
+
+  // ── Floating hover card overlay (always-on-top, over live web pages) ──
+  ipcMain.on(IPC.HoverShow, (_e, p: HoverShowPayload) => overlay?.showHover(p))
+  ipcMain.on(IPC.HoverHide, () => overlay?.hideHover())
+
+  // ── Settings that affect main (discard timeout) ──
+  ipcMain.on(IPC.SettingsApply, (_e, p: SettingsApplyPayload) => {
+    if (typeof p.discardMinutes === 'number' && p.discardMinutes > 0) {
+      panels.setDiscardAfterMs(p.discardMinutes * 60_000)
+    }
+  })
+
+  // ── Custom context menu (rendered in the overlay window, floats over pages) ──
+  // Renderer asks to show the menu → overlay floats it at the cursor.
+  ipcMain.on(IPC.MenuShow, (_e, p: MenuShowPayload) => overlay?.showMenu(p))
+  // The overlay reports a chosen item → hide it, then route to the main renderer.
+  ipcMain.on(IPC.MenuPick, (_e, p: MenuPickPayload) => {
+    overlay?.hideMenu()
+    if (!mainWindow) return
+    if (p.kind === 'workspace') {
+      mainWindow.webContents.send(IPC.WorkspaceMenuAction, {
+        workspaceId: p.targetId,
+        action: p.action
+      })
+    } else {
+      mainWindow.webContents.send(IPC.FolderMenuAction, { name: p.targetId, action: p.action })
+    }
+  })
+  // The overlay reports a click outside the menu → just hide it.
+  ipcMain.on(IPC.MenuDismiss, () => overlay?.hideMenu())
+
+  // ── Mini-player controls (overlay window → main) ──
+  // play/pause/next/prev drive the corner video in place; close is special: it
+  // EXPANDS the deck back to full size (keep playing) so the user can watch it.
+  ipcMain.on(IPC.MiniPlayerControl, (_e, p: MiniPlayerControlEvent) => {
+    switch (p.action) {
+      case 'play':
+        panels.miniPlay()
+        break
+      case 'pause':
+        panels.miniPause()
+        break
+      case 'next':
+        panels.miniNext()
+        break
+      case 'prev':
+        panels.miniPrevious()
+        break
+      case 'loop':
+        panels.miniToggleLoop()
+        break
+      case 'reload':
+        panels.miniReload()
+        break
+      case 'collapse':
+        panels.miniCollapse()
+        break
+      case 'expand':
+        panels.miniExpand()
+        break
+      case 'seek':
+        panels.miniSeek(p.time ?? 0)
+        break
+      case 'search':
+        panels.miniSearch(p.query ?? '')
+        break
+      case 'close': {
+        // "Close" = this isn't a song, let me actually watch it. Tell the MAIN
+        // renderer to focus the deck; it owns workspace state and will activate
+        // the owning workspace, whose next showOnly brings the deck back full-size
+        // (mini-player mode clears because the panel is now in the show-set).
+        const panelId = panels.miniPlayerPanelId
+        if (panelId && mainWindow && !mainWindow.isDestroyed()) {
+          const event: FocusPanelEvent = { panelId }
+          mainWindow.webContents.send(IPC.FocusPanel, event)
+          // "Close" means "let me actually watch this" → bring Decks forward
+          // (the other controls deliberately do NOT raise the app).
+          if (mainWindow.isMinimized()) mainWindow.restore()
+          mainWindow.show()
+          mainWindow.focus()
+        }
+        break
+      }
+      case 'move-start':
+        panels.miniMoveStart()
+        break
+      case 'move':
+        panels.miniMove(p.dx ?? 0, p.dy ?? 0)
+        break
+      case 'move-end':
+        panels.miniMoveEnd()
+        break
+    }
+  })
+}
+
+app.whenReady().then(async () => {
+  electronApp.setAppUserModelId('com.jetcore.app')
+  app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
+
+  // ── DRM / Widevine (Netflix, Disney+, Spotify, …) ──
+  // Stock Electron ships NO Widevine CDM, so DRM streams won't play. The castLabs
+  // "Electron for Content Security" build (a drop-in fork) adds Widevine + a
+  // `components` API; gate startup on it so the CDM is loaded before any deck.
+  // This is FEATURE-DETECTED: a no-op on stock Electron, active on the castLabs
+  // build. See the README "DRM streaming" section for the dependency swap + VMP
+  // signing the castLabs build needs (we don't bundle it because it requires an
+  // EVS account + signing on your machine).
+  const drm = (electron as { components?: { whenReady(): Promise<void> } }).components
+  if (drm) {
+    try {
+      await drm.whenReady()
+      console.log('[decks] Widevine components ready — DRM-capable build')
+    } catch (err) {
+      console.error('[decks] Widevine components failed to initialize:', err)
+    }
+  }
+
+  // Present as plain Chrome to embedded sites: the default UA contains
+  // "decks/x" and "Electron/x" tokens that some sites (Google sign-in, etc.)
+  // reject outright ("disallowed_useragent" / "unsupported browser"). Use a
+  // clean, fixed Chrome UA — shared with the per-view UA so every embedded deck
+  // and OAuth popup looks like a normal browser.
+  app.userAgentFallback = CHROME_UA
+
+  // NOTE: do NOT free the renderer dev port here. By the time main runs,
+  // electron-vite has already started the dev server ON that port — freeing it
+  // would kill our own live dev server and tear the app down on launch. Stale-
+  // port recovery belongs BEFORE electron-vite starts (see launcher.py).
+
+  // Register concrete provider clients before any provider IPC can arrive.
+  // Phase 0: this is a no-op seam; Phase 1 fills providers/index.ts.
+  registerAllProviders()
+
+  // Hydrate the persisted JetCore account so provider keys are scoped under the
+  // signed-in user (accounts.setCurrentUser) BEFORE any provider IPC can arrive.
+  // Lazy by design — this does NOT spawn the Operations backend.
+  await authStatus().catch(() => {})
+
+  registerIpc()
+  createWindow()
+
+  // Check GitHub for a newer release and (if found) download + offer to install.
+  // No-op in dev / when no read-only update token is baked in.
+  initAutoUpdate(mainWindow)
+
+  // Global hotkey (Ctrl/Cmd+Shift+Space) → the DevBay quick-actions overlay.
+  registerDevBayOverlay()
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+/** Tear down all panel views and any tracked child processes. Never throws. */
+let cleanedUp = false
+function cleanup(): void {
+  if (cleanedUp) return
+  cleanedUp = true
+  try {
+    panels.destroyAll()
+  } catch {
+    /* ignore */
+  }
+  try {
+    overlay?.destroy()
+  } catch {
+    /* ignore */
+  }
+  try {
+    stopCodeServer()
+  } catch {
+    /* ignore */
+  }
+  try {
+    stopOperations()
+  } catch {
+    /* ignore */
+  }
+  try {
+    destroyDevBayOverlay()
+  } catch {
+    /* ignore */
+  }
+  try {
+    killTrackedChildren()
+  } catch {
+    /* ignore */
+  }
+}
+
+app.on('before-quit', cleanup)
+app.on('will-quit', cleanup)
+
+app.on('window-all-closed', () => {
+  cleanup()
+  if (process.platform !== 'darwin') app.quit()
+})
+
+export { mainWindow }

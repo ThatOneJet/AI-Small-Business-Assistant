@@ -1,0 +1,255 @@
+/**
+ * Decks — preload.
+ *
+ * Implements the `DecksApi` contract (see @shared/ipc) and exposes it on
+ * `window.decks` via contextBridge. This is a thin, dumb forwarder: it owns no
+ * logic, only marshals calls to the main process and relays events back.
+ */
+import { contextBridge, ipcRenderer } from 'electron'
+import { electronAPI } from '@electron-toolkit/preload'
+import { IPC } from '@shared/ipc'
+import type {
+  DecksApi,
+  PanelCreatePayload,
+  PanelNavigatePayload,
+  PanelSetBoundsPayload,
+  PanelTearOffPayload,
+  PanelShowOnlyPayload,
+  PanelUpdateEvent,
+  PanelDiscardStateEvent,
+  WorkspaceMenuActionEvent,
+  FolderMenuActionEvent,
+  MenuShowPayload,
+  MenuPickPayload,
+  OverlayMenuEvent,
+  HoverShowPayload,
+  SettingsApplyPayload,
+  OverlayRenderEvent,
+  OverlayMiniPlayerEvent,
+  MiniPlayerControlEvent,
+  FocusPanelEvent,
+  UpdateStatusEvent,
+  ProviderConnectPayload,
+  ProviderFetchPayload,
+  FeedbackPayload,
+  FileSavePayload,
+  OperationsBoundsPayload,
+  AuthLoginPayload,
+  AuthSignupPayload,
+  CloudAuthPayload,
+  CloudRecoverPayload,
+  VaultSetPayload,
+  SummitApiPayload,
+  SummitUploadPayload,
+  PylonApiPayload,
+  DevBayApiPayload
+} from '@shared/ipc'
+import type { PanelId, PersistedState, ProviderId } from '@shared/types'
+
+const api: DecksApi = {
+  displays: () => ipcRenderer.invoke(IPC.Displays),
+  cursorPoint: () => ipcRenderer.invoke(IPC.CursorPoint),
+  borderless: {
+    start: (cfg) => ipcRenderer.invoke(IPC.BorderlessStart, cfg),
+    stop: () => ipcRenderer.invoke(IPC.BorderlessStop),
+    state: () => ipcRenderer.invoke(IPC.BorderlessState),
+    setConfig: (cfg) => ipcRenderer.invoke(IPC.BorderlessConfig, cfg),
+    pair: (peerId) => ipcRenderer.invoke(IPC.BorderlessPair, peerId),
+    unpair: (peerId) => ipcRenderer.invoke(IPC.BorderlessUnpair, peerId),
+    onState: (cb) => {
+      const listener = (_e: unknown, s: unknown): void => cb(s as never)
+      ipcRenderer.on(IPC.BorderlessStateChanged, listener)
+      return () => ipcRenderer.removeListener(IPC.BorderlessStateChanged, listener)
+    },
+    onCursor: (cb) => {
+      const listener = (_e: unknown, ev: unknown): void => cb(ev as never)
+      ipcRenderer.on(IPC.BorderlessCursor, listener)
+      return () => ipcRenderer.removeListener(IPC.BorderlessCursor, listener)
+    }
+  },
+  panel: {
+    create: (p: PanelCreatePayload) => ipcRenderer.invoke(IPC.PanelCreate, p),
+    destroy: (panelId: PanelId) => ipcRenderer.invoke(IPC.PanelDestroy, panelId),
+    navigate: (p: PanelNavigatePayload) => ipcRenderer.invoke(IPC.PanelNavigate, p),
+    reload: (panelId: PanelId) => ipcRenderer.invoke(IPC.PanelReload, panelId),
+    signIn: (panelId: PanelId) => ipcRenderer.invoke(IPC.PanelSignIn, panelId),
+    goBack: (panelId: PanelId) => ipcRenderer.invoke(IPC.PanelGoBack, panelId),
+    goForward: (panelId: PanelId) => ipcRenderer.invoke(IPC.PanelGoForward, panelId),
+    setBounds: (p: PanelSetBoundsPayload) => ipcRenderer.invoke(IPC.PanelSetBounds, p),
+    showOnly: (p: PanelShowOnlyPayload) => ipcRenderer.invoke(IPC.PanelShowOnly, p),
+    hideAll: () => ipcRenderer.invoke(IPC.PanelHideAll),
+    setKeepAlive: (panelId: PanelId, keepAlive: boolean) =>
+      ipcRenderer.invoke(IPC.PanelSetKeepAlive, panelId, keepAlive),
+    tearOff: (p: PanelTearOffPayload) => ipcRenderer.invoke(IPC.PanelTearOff, p)
+  },
+  provider: {
+    connect: (p: ProviderConnectPayload) => ipcRenderer.invoke(IPC.ProviderConnect, p),
+    fetch: (p: ProviderFetchPayload) => ipcRenderer.invoke(IPC.ProviderFetch, p),
+    disconnect: (provider: ProviderId, accountId: string) =>
+      ipcRenderer.invoke(IPC.ProviderDisconnect, provider, accountId),
+    status: (provider: ProviderId, accountId: string) =>
+      ipcRenderer.invoke(IPC.ProviderStatus, provider, accountId),
+    accounts: (provider: ProviderId) => ipcRenderer.invoke(IPC.ProviderAccounts, provider)
+  },
+  codeserver: {
+    start: () => ipcRenderer.invoke(IPC.CodeServerStart),
+    stop: () => ipcRenderer.invoke(IPC.CodeServerStop)
+  },
+  operations: {
+    start: () => ipcRenderer.invoke(IPC.OperationsStart),
+    preload: () => ipcRenderer.invoke(IPC.OperationsPreload),
+    show: (p: OperationsBoundsPayload) => ipcRenderer.invoke(IPC.OperationsShow, p),
+    hide: () => ipcRenderer.invoke(IPC.OperationsHide),
+    stop: () => ipcRenderer.invoke(IPC.OperationsStop)
+  },
+  summit: {
+    api: (p: SummitApiPayload) => ipcRenderer.invoke(IPC.SummitApi, p),
+    upload: (p: SummitUploadPayload) => ipcRenderer.invoke(IPC.SummitUpload, p),
+    account: () => ipcRenderer.invoke(IPC.SummitAccount)
+  },
+  pylon: {
+    connect: (p: { baseUrl: string; token: string }) => ipcRenderer.invoke(IPC.PylonConnect, p),
+    status: () => ipcRenderer.invoke(IPC.PylonStatus),
+    fetch: () => ipcRenderer.invoke(IPC.PylonFetch),
+    disconnect: () => ipcRenderer.invoke(IPC.PylonDisconnect),
+    api: (p: PylonApiPayload) => ipcRenderer.invoke(IPC.PylonApi, p)
+  },
+  devbay: {
+    connect: (token: string) => ipcRenderer.invoke(IPC.DevBayConnect, token),
+    status: () => ipcRenderer.invoke(IPC.DevBayStatus),
+    fetch: () => ipcRenderer.invoke(IPC.DevBayFetch),
+    disconnect: () => ipcRenderer.invoke(IPC.DevBayDisconnect),
+    draftRelease: (p: { fullName: string; tag: string; name: string; body: string }) =>
+      ipcRenderer.invoke(IPC.DevBayDraftRelease, p),
+    api: (p: DevBayApiPayload) => ipcRenderer.invoke(IPC.DevBayApi, p),
+    overlayHide: () => ipcRenderer.send(IPC.DevBayOverlayHide),
+    onOverlayShown: (cb: () => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on(IPC.DevBayOverlayShown, listener)
+      return () => ipcRenderer.removeListener(IPC.DevBayOverlayShown, listener)
+    }
+  },
+  auth: {
+    login: (p: AuthLoginPayload) => ipcRenderer.invoke(IPC.AuthLogin, p),
+    signup: (p: AuthSignupPayload) => ipcRenderer.invoke(IPC.AuthSignup, p),
+    logout: () => ipcRenderer.invoke(IPC.AuthLogout),
+    status: () => ipcRenderer.invoke(IPC.AuthStatus)
+  },
+  cloud: {
+    signUp: (p: CloudAuthPayload) => ipcRenderer.invoke(IPC.CloudSignUp, p),
+    signIn: (p: CloudAuthPayload) => ipcRenderer.invoke(IPC.CloudSignIn, p),
+    signOut: () => ipcRenderer.invoke(IPC.CloudSignOut),
+    status: () => ipcRenderer.invoke(IPC.CloudStatus),
+    recover: (p: CloudRecoverPayload) => ipcRenderer.invoke(IPC.CloudRecover, p)
+  },
+  vault: {
+    set: (p: VaultSetPayload) => ipcRenderer.invoke(IPC.VaultSet, p),
+    get: (key: string) => ipcRenderer.invoke(IPC.VaultGet, key)
+  },
+  state: {
+    load: () => ipcRenderer.invoke(IPC.StateLoad),
+    save: (state: PersistedState) => ipcRenderer.invoke(IPC.StateSave, state)
+  },
+  feedback: {
+    submit: (p: FeedbackPayload) => ipcRenderer.invoke(IPC.FeedbackSubmit, p)
+  },
+  file: {
+    save: (p: FileSavePayload) => ipcRenderer.invoke(IPC.FileSave, p)
+  },
+  metrics: {
+    get: () => ipcRenderer.invoke(IPC.MetricsGet),
+    panels: () => ipcRenderer.invoke(IPC.PanelMetricsGet)
+  },
+  window: {
+    minimize: () => ipcRenderer.send(IPC.WindowMinimize),
+    maximize: () => ipcRenderer.send(IPC.WindowMaximize),
+    close: () => ipcRenderer.send(IPC.WindowClose)
+  },
+  menu: {
+    show: (p: MenuShowPayload) => ipcRenderer.send(IPC.MenuShow, p),
+    pick: (p: MenuPickPayload) => ipcRenderer.send(IPC.MenuPick, p),
+    dismiss: () => ipcRenderer.send(IPC.MenuDismiss)
+  },
+  hover: {
+    show: (p: HoverShowPayload) => ipcRenderer.send(IPC.HoverShow, p),
+    hide: () => ipcRenderer.send(IPC.HoverHide)
+  },
+  miniPlayer: {
+    control: (e: MiniPlayerControlEvent) => ipcRenderer.send(IPC.MiniPlayerControl, e)
+  },
+  settings: {
+    apply: (p: SettingsApplyPayload) => ipcRenderer.send(IPC.SettingsApply, p)
+  },
+  onPanelUpdate: (cb: (e: PanelUpdateEvent) => void) => {
+    const listener = (_: unknown, e: PanelUpdateEvent): void => cb(e)
+    ipcRenderer.on(IPC.PanelUpdate, listener)
+    return () => ipcRenderer.removeListener(IPC.PanelUpdate, listener)
+  },
+  onWorkspaceMenuAction: (cb: (e: WorkspaceMenuActionEvent) => void) => {
+    const listener = (_: unknown, e: WorkspaceMenuActionEvent): void => cb(e)
+    ipcRenderer.on(IPC.WorkspaceMenuAction, listener)
+    return () => ipcRenderer.removeListener(IPC.WorkspaceMenuAction, listener)
+  },
+  onFolderMenuAction: (cb: (e: FolderMenuActionEvent) => void) => {
+    const listener = (_: unknown, e: FolderMenuActionEvent): void => cb(e)
+    ipcRenderer.on(IPC.FolderMenuAction, listener)
+    return () => ipcRenderer.removeListener(IPC.FolderMenuAction, listener)
+  },
+  onPanelDiscardState: (cb: (e: PanelDiscardStateEvent) => void) => {
+    const listener = (_: unknown, e: PanelDiscardStateEvent): void => cb(e)
+    ipcRenderer.on(IPC.PanelDiscardState, listener)
+    return () => ipcRenderer.removeListener(IPC.PanelDiscardState, listener)
+  },
+  onOverlayRender: (cb: (e: OverlayRenderEvent) => void) => {
+    const listener = (_: unknown, e: OverlayRenderEvent): void => cb(e)
+    ipcRenderer.on(IPC.OverlayRender, listener)
+    return () => ipcRenderer.removeListener(IPC.OverlayRender, listener)
+  },
+  onOverlayMenu: (cb: (e: OverlayMenuEvent) => void) => {
+    const listener = (_: unknown, e: OverlayMenuEvent): void => cb(e)
+    ipcRenderer.on(IPC.OverlayMenu, listener)
+    return () => ipcRenderer.removeListener(IPC.OverlayMenu, listener)
+  },
+  onMiniPlayer: (cb: (e: OverlayMiniPlayerEvent) => void) => {
+    const listener = (_: unknown, e: OverlayMiniPlayerEvent): void => cb(e)
+    ipcRenderer.on(IPC.OverlayMiniPlayer, listener)
+    return () => ipcRenderer.removeListener(IPC.OverlayMiniPlayer, listener)
+  },
+  onMiniLevels: (cb: (levels: number[]) => void) => {
+    const listener = (_: unknown, levels: number[]): void => cb(levels)
+    ipcRenderer.on(IPC.OverlayMiniLevels, listener)
+    return () => ipcRenderer.removeListener(IPC.OverlayMiniLevels, listener)
+  },
+  onFocusPanel: (cb: (e: FocusPanelEvent) => void) => {
+    const listener = (_: unknown, e: FocusPanelEvent): void => cb(e)
+    ipcRenderer.on(IPC.FocusPanel, listener)
+    return () => ipcRenderer.removeListener(IPC.FocusPanel, listener)
+  },
+  onOperationsExit: (cb: () => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(IPC.OperationsExit, listener)
+    return () => ipcRenderer.removeListener(IPC.OperationsExit, listener)
+  },
+  update: {
+    onStatus: (cb: (e: UpdateStatusEvent) => void) => {
+      const listener = (_: unknown, e: UpdateStatusEvent): void => cb(e)
+      ipcRenderer.on(IPC.UpdateStatus, listener)
+      return () => ipcRenderer.removeListener(IPC.UpdateStatus, listener)
+    },
+    restart: () => ipcRenderer.send(IPC.UpdateRestart)
+  }
+}
+
+if (process.contextIsolated) {
+  try {
+    contextBridge.exposeInMainWorld('electron', electronAPI)
+    contextBridge.exposeInMainWorld('decks', api)
+  } catch (error) {
+    console.error(error)
+  }
+} else {
+  // @ts-ignore (no contextIsolation)
+  window.electron = electronAPI
+  // @ts-ignore
+  window.decks = api
+}

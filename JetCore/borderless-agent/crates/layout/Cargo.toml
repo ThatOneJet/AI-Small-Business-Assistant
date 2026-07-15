@@ -1,0 +1,9 @@
+[package]
+name = "layout"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-machine layout geometry and edge-crossing resolution for JetCore Borderless."
+
+[dependencies]
+protocol.workspace = true
+tracing.workspace = true

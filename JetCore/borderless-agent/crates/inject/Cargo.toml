@@ -1,0 +1,18 @@
+[package]
+name = "inject"
+version = "0.1.0"
+edition = "2021"
+description = "Synthetic input injection (Win32 SendInput) for JetCore Borderless."
+
+[dependencies]
+protocol.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

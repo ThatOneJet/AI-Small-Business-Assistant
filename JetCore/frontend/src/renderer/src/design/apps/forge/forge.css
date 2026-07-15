@@ -1,0 +1,148 @@
+/* Forge — bend React Flow's chrome to the JetCore look (the nodes are already
+   JetCore cards; this styles handles, edges, controls, ports, and note-pick mode). */
+
+.jc-forge-handle {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+}
+.jc-forge-handle:hover {
+  background: var(--accent-h);
+}
+
+/* drag grip — the unambiguous move handle at the top of each box */
+.jc-forge-grip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 16px;
+  cursor: grab;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  border-top-left-radius: var(--r-md);
+  border-top-right-radius: var(--r-md);
+}
+.jc-forge-grip:active {
+  cursor: grabbing;
+}
+.jc-forge-box:hover .jc-forge-grip {
+  color: var(--text-2);
+}
+
+/* the subtle anchor a note's thread ties to */
+/* The note-thread anchor is a connection point, not a user target (notes attach
+   via the pick-a-box flow). Keep it sized for React Flow's geometry but invisible
+   so it doesn't read as a stray dot above the card. */
+.jc-forge-note-handle {
+  width: 7px;
+  height: 7px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  opacity: 0;
+}
+
+/* tiny inline buttons inside a box: add-port and remove-port */
+.jc-forge-add,
+.jc-forge-x {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  cursor: pointer;
+  flex: 0 0 auto;
+  padding: 0;
+}
+.jc-forge-add:hover {
+  background: var(--accent-soft);
+  color: var(--accent-h);
+  border-color: var(--accent-line);
+}
+.jc-forge-x {
+  border-color: transparent;
+}
+.jc-forge-x:hover {
+  background: color-mix(in oklch, var(--neg) 16%, transparent);
+  color: var(--neg);
+}
+
+/* footer "+ Input / + Output" to populate an empty side */
+.jc-forge-footadd {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.jc-forge-footadd:hover {
+  color: var(--accent-h);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+/* edges + controls */
+.react-flow__edge-path,
+.react-flow__connection-path {
+  stroke: var(--accent);
+}
+.react-flow__controls {
+  box-shadow: 0 12px 28px -18px hsl(var(--shadow-c) / 0.6);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.react-flow__controls-button {
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.react-flow__controls-button:hover {
+  background: var(--surface-3);
+}
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+.react-flow__attribution {
+  display: none;
+}
+
+/* ── note-attach pick mode: marching ants prompting "choose a box" ────────── */
+.jc-forge-box {
+  position: relative;
+}
+@keyframes jc-forge-ants {
+  to {
+    background-position: 16px 0, -16px 100%, 0 -16px, 100% 16px;
+  }
+}
+.jc-forge-pick .jc-forge-box::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: calc(var(--r-md) + 4px);
+  pointer-events: none;
+  background-image: linear-gradient(90deg, var(--accent) 50%, transparent 0),
+    linear-gradient(90deg, var(--accent) 50%, transparent 0), linear-gradient(0deg, var(--accent) 50%, transparent 0),
+    linear-gradient(0deg, var(--accent) 50%, transparent 0);
+  background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
+  background-size: 8px 2px, 8px 2px, 2px 8px, 2px 8px;
+  background-position: 0 0, 0 100%, 0 0, 100% 0;
+  animation: jc-forge-ants 0.5s infinite linear;
+}
+.jc-forge-pick .react-flow__node-box {
+  cursor: crosshair;
+}

@@ -1,0 +1,13 @@
+# Summit backend dependencies
+flask>=2.3.0
+python-dotenv>=1.0.0
+PyJWT>=2.8.0
+Werkzeug>=2.3.0
+SQLAlchemy>=2.0.0
+pandas>=2.0.0
+openpyxl>=3.1.0          # .xlsx / .xlsm reading
+xlrd>=2.0.1              # legacy .xls reading
+requests>=2.31.0
+plaid-python>=18.0.0     # optional: bank sync (Finances tab)
+pillow>=10.0.0           # icon generation (desktop packaging)
+pywebview>=5.0.0         # optional: desktop window wrapper

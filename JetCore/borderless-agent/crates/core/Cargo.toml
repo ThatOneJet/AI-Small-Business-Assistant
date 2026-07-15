@@ -1,0 +1,26 @@
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2021"
+description = "JetCore Borderless orchestration: ties capture/inject/transport/layout into the KVM session loop."
+
+[dependencies]
+protocol.workspace = true
+topology = { path = "../topology" }
+capture = { path = "../capture" }
+inject = { path = "../inject" }
+transport = { path = "../transport" }
+discovery = { path = "../discovery" }
+pairing = { path = "../pairing" }
+layout = { path = "../layout" }
+clipboard = { path = "../clipboard" }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

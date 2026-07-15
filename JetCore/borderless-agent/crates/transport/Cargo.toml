@@ -1,0 +1,13 @@
+[package]
+name = "transport"
+version = "0.1.0"
+edition = "2021"
+description = "Encrypted peer session transport (Noise over TCP, postcard framing) for JetCore Borderless."
+
+[dependencies]
+protocol.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+snow.workspace = true

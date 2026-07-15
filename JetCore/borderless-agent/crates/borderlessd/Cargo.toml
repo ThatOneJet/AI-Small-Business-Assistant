@@ -1,0 +1,28 @@
+[package]
+name = "borderlessd"
+version = "0.1.0"
+edition = "2021"
+description = "JetCore Borderless daemon binary (software KVM agent)."
+
+[[bin]]
+name = "borderlessd"
+path = "src/main.rs"
+
+[dependencies]
+protocol.workspace = true
+core = { path = "../core" }
+pairing = { path = "../pairing" }
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "time",
+    "macros",
+    "io-util",
+    "signal",
+] }

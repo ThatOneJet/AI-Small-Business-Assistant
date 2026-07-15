@@ -1,0 +1,236 @@
+/**
+ * Decks — shared domain types.
+ *
+ * This file is the single source of truth for the data model. Both the main
+ * process and the renderer import from here (alias: `@shared/types`).
+ * Do not redefine these shapes anywhere else.
+ */
+
+export type WorkspaceId = string
+export type PanelId = string
+
+/**
+ * Service providers that back a NATIVE deck (our own React UI over a service's
+ * API, data fetched in main and sanitized over IPC). WEB decks (embedded
+ * WebContentsViews) have no provider. Add new providers here as they ship.
+ *
+ * NOTE: Reddit and YouTube intentionally stay EMBEDDED web decks (not native),
+ * so they are NOT providers. (A YouTube channel can later feed the follows wall
+ * via per-channel RSS — that is the 'rss' provider, not a 'youtube' provider.)
+ */
+export type ProviderId =
+  | 'canvas'
+  | 'github'
+  | 'bluesky'
+  | 'mastodon'
+  | 'spotify'
+  | 'rss'
+  | 'follows-wall'
+  | 'discovery'
+  | 'notes'
+  | 'calendar'
+
+/**
+ * Connection status of a provider, reported by its ProviderClient (main) back
+ * to the renderer. `connected` reflects whether a usable token/session exists.
+ */
+export interface ProviderStatus {
+  provider: ProviderId
+  connected: boolean
+  /** Human-readable account label (e.g. "@octocat") when connected. */
+  account?: string
+  /** Set when connect/status failed; a short, user-safe message (never a token). */
+  error?: string
+}
+
+/**
+ * One connected account for a provider. A provider can have many (e.g. two
+ * Canvas schools). `id` is a stable opaque key; `label` is what the UI shows.
+ */
+export interface AccountSummary {
+  id: string
+  label: string
+}
+
+/** A single deck inside a workspace — either an embedded web view or a native one. */
+export interface Panel {
+  id: PanelId
+  title: string
+  url: string
+  /**
+   * Deck kind. Absent/undefined means 'web' (back-compat with existing persisted
+   * state and all WEB decks). 'native' decks render OUR React UI over a provider
+   * API instead of an embedded WebContentsView.
+   */
+  kind?: 'web' | 'native'
+  /** The backing service provider. Only set when `kind === 'native'`. */
+  provider?: ProviderId
+  /**
+   * Which connected account this native deck reads. Only set when
+   * `kind === 'native'`. A provider can have several connected accounts (e.g. two
+   * Canvas schools); this binds the deck to one. Credentials live in main keyed
+   * by `<provider>:<accountId>`.
+   */
+  accountId?: string
+  /** Last known favicon URL (updated by main via panel:navigated events). */
+  favicon?: string
+  /** Navigation capabilities, kept fresh from the live WebContents. */
+  canGoBack?: boolean
+  canGoForward?: boolean
+  /** True while the panel is loading. */
+  loading?: boolean
+  /** REAL unread count parsed from the page title (e.g. "(3) Reddit" → 3). 0/undefined = none. */
+  badge?: number
+  /** REAL media state — true while a media element is actively playing in the deck. */
+  playing?: boolean
+  /**
+   * True when the panel's renderer process has been discarded to free RAM. Its
+   * WebContentsView no longer exists; the saved `url` is reloaded automatically
+   * the next time the panel is shown. Persists across restarts via the store.
+   */
+  discarded?: boolean
+}
+
+/**
+ * Split-view layout. A workspace's panels are arranged as a binary-ish tree:
+ * either a single leaf panel, or a row/column split of child nodes.
+ * `sizes` are fractional weights (sum ~1) parallel to `children`.
+ */
+export type LayoutNode =
+  | { type: 'leaf'; panelId: PanelId }
+  | { type: 'split'; direction: 'row' | 'column'; sizes: number[]; children: LayoutNode[] }
+
+/** Live state shown on the workspace rail (the colored dot + subtitle). */
+export type WorkspaceStatus = 'active' | 'idle' | 'paused' | 'unread'
+
+export interface WorkspaceLiveState {
+  status: WorkspaceStatus
+  /** For status='unread'. */
+  unread?: number
+  /** For status='paused' — epoch ms when it was paused (rail shows "paused HH:MM"). */
+  pausedAt?: number
+}
+
+export interface Workspace {
+  id: WorkspaceId
+  name: string
+  /** Short descriptor under the name, e.g. "2 panels · term", "chat · code". */
+  subtitle?: string
+  /** Accent color for the active state / icon chip. */
+  color?: string
+  /** Optional emoji or short glyph shown in the rail chip. */
+  glyph?: string
+  panels: Panel[]
+  layout: LayoutNode
+  live: WorkspaceLiveState
+  /** Free-text notes the user leaves on a workspace (shown in its right-click menu). */
+  notes?: string
+  /** Optional group/section label for organizing the rail (e.g. "Work", "Fun"). */
+  group?: string
+  /**
+   * Keep-alive: when true, this workspace's decks are never auto-discarded — they
+   * render eagerly and stay loaded (and the flag persists). Toggled from the rail
+   * right-click menu (per app, or per group via its members).
+   */
+  keepAlive?: boolean
+  /**
+   * Pinned: when true, this workspace sorts to the TOP of its dock section
+   * (Native / Web / its folder). Independent of keepAlive (which is a
+   * never-discard memory pin); pinned only affects ordering. Persists.
+   */
+  pinned?: boolean
+  /**
+   * Electron session partition. Always `persist:<id>` so cookies / logins
+   * survive restarts. Set once at creation; never change it.
+   */
+  partition: string
+}
+
+export type Theme = 'dark' | 'light'
+
+/** A target reachable from the Cmd+K palette. */
+export interface CommandItem {
+  id: string
+  kind: 'workspace' | 'pinned-site' | 'command'
+  label: string
+  hint?: string
+  /** For pinned-site: the URL to open. For workspace: the workspace id. */
+  value?: string
+  glyph?: string
+}
+
+/** Pixel rectangle used to position a WebContentsView over the panel slot. */
+export interface PanelBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * The signed-in JetCore account (NON-secret user fields only). The session JWT is
+ * NEVER stored here — it lives in the OS keychain via safeStorage (tokens.ts under
+ * `jetcore:session`). This shape is persisted in decks-state.json and is also the
+ * `account` carried in the renderer store and returned by the auth IPC channels.
+ *
+ * BOTH Decks provider keys AND Operations data are scoped under `userId`, so a
+ * single JetCore account owns everything (cloud sync can layer on later).
+ */
+export interface JetCoreAccount {
+  userId: string
+  email: string
+  firstName: string
+  /** Account segment chosen at signup: a person, a small business, or a restaurant. */
+  segment: 'individual' | 'small_biz' | 'restaurant'
+  /** Subscription plan reported by the backend (e.g. 'free', 'pro'). */
+  plan: string
+  isAdmin: boolean
+  /** Optional avatar/profile-pic URL the backend returns. */
+  avatar?: string
+}
+
+/** Plans that unlock Summit (operations). Normalised: lowercase, spaces/dashes → '_'. */
+const SUMMIT_PLANS = new Set(['small_business', 'enterprise', 'business', 'pro'])
+/** Business segments (chosen at signup) that unlock Summit. */
+const SUMMIT_SEGMENTS = new Set(['small_biz', 'restaurant'])
+/** Founding-team / admin emails that always get Summit, regardless of plan. */
+const SUMMIT_ADMIN_EMAILS = new Set([
+  'thatonejet@jetcore.local',
+  'srijoy@gmail.com',
+  'adityasrijeet12355@gmail.com'
+])
+
+/**
+ * Summit (operations) is a business feature — only Small-business / Enterprise
+ * accounts (or admins) get it; individuals on the free tier do not. Gating it lets
+ * us tailor the CSV sales/tender import to business customers. Used by the renderer
+ * (show Summit locked in the rail) and can back main-process enforcement too.
+ */
+export function summitEntitled(
+  a: { segment?: string; plan?: string; isAdmin?: boolean; email?: string } | null | undefined
+): boolean {
+  if (!a) return false
+  if (a.isAdmin) return true
+  if (a.email && SUMMIT_ADMIN_EMAILS.has(a.email.trim().toLowerCase())) return true
+  if (a.segment && SUMMIT_SEGMENTS.has(a.segment)) return true
+  const plan = (a.plan || '').toLowerCase().replace(/[\s-]+/g, '_')
+  return SUMMIT_PLANS.has(plan)
+}
+
+/** Full app snapshot persisted to disk and hydrated on launch. */
+export interface PersistedState {
+  version: number
+  theme: Theme
+  workspaces: Workspace[]
+  activeWorkspaceId: WorkspaceId | null
+  /** App-level settings (idle-discard timeout, accent color). Optional for back-compat. */
+  settings?: {
+    discardMinutes: number
+    accent: string
+  }
+  /**
+   * The signed-in JetCore account (non-secret fields). Absent when logged out.
+   * The session JWT is NOT here — it's in the OS keychain (see JetCoreAccount).
+   */
+  account?: JetCoreAccount
+}

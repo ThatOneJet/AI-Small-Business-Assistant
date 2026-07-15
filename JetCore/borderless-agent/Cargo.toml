@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/topology",
+    "crates/capture",
+    "crates/inject",
+    "crates/transport",
+    "crates/discovery",
+    "crates/pairing",
+    "crates/layout",
+    "crates/clipboard",
+    "crates/core",
+    "crates/borderlessd",
+]
+
+# Shared, pinned dependency versions for the whole workspace.
+# Crates opt in via `<dep>.workspace = true`.
+#
+# `windows` is pinned to a single recent 0.5x version across the entire
+# workspace (see crates/protocol PINNED_WINDOWS_VERSION). Win32 feature
+# flags are selected per-crate, not here, so each crate pulls only the
+# Win32 surface it actually needs.
+[workspace.dependencies]
+windows = "0.59"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+postcard = { version = "1.1", features = ["use-std"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+snow = "0.10"
+rand = "0.10"
+arboard = "3.6"
+
+# Internal crate, referenced by path so every other crate shares the frozen contract.
+protocol = { path = "crates/protocol" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

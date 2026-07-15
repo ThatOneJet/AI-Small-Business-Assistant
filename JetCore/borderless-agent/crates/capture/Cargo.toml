@@ -1,0 +1,20 @@
+[package]
+name = "capture"
+version = "0.1.0"
+edition = "2021"
+description = "Low-level keyboard/mouse capture (Win32 hooks / Raw Input) for JetCore Borderless."
+
+[dependencies]
+protocol.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tokio = { workspace = true }
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

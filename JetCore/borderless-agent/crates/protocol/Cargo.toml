@@ -1,0 +1,11 @@
+[package]
+name = "protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Frozen shared wire/control contract for JetCore Borderless (software KVM)."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+thiserror.workspace = true

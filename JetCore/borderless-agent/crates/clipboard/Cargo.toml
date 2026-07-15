@@ -1,0 +1,11 @@
+[package]
+name = "clipboard"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-machine clipboard sync for JetCore Borderless."
+
+[dependencies]
+protocol.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+arboard.workspace = true

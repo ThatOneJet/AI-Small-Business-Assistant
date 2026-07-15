@@ -1,0 +1,9 @@
+
+# tsc --build emit artifacts (composite). We typecheck with --noEmit and build
+# via electron-vite; never commit in-tree .js/.d.ts emitted next to sources.
+*.tsbuildinfo
+src/**/*.js
+src/**/*.d.ts
+# ...but hand-written declarations (no sibling .ts, so never emit targets) ARE
+# source and must stay tracked:
+!src/shared/window.d.ts
