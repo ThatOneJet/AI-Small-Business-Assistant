@@ -4,6 +4,8 @@ import {
 } from 'recharts'
 import { api } from '../../api'
 import UploadButton from './UploadButton'
+import EmptyState from './EmptyState'
+import CameraScan from './CameraScan'
 
 const money = n => '$' + (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
@@ -31,6 +33,7 @@ export default function Inventory({ uid }) {
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(true)
   const [reload,  setReload]  = useState(0)
+  const [scanOpen, setScanOpen] = useState(false)
   const cs = chartStyle()
 
   useEffect(() => {
@@ -40,6 +43,13 @@ export default function Inventory({ uid }) {
       .catch(() => setData(null))
       .finally(() => setLoading(false))
   }, [uid, reload])
+
+  // The guided tour opens/closes the scanner via a window event.
+  useEffect(() => {
+    const onScan = e => setScanOpen(e.detail === 'open')
+    window.addEventListener('summit-scan', onScan)
+    return () => window.removeEventListener('summit-scan', onScan)
+  }, [])
 
   const s        = data?.summary || {}
   const items    = data?.items || []
@@ -52,15 +62,23 @@ export default function Inventory({ uid }) {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
         <UploadButton type="inventory" uid={uid} label="Import inventory" hasData={hasData} onDone={() => setReload(r => r + 1)} />
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>CSV/Excel with sku, product, unit_cost, unit_price, stock_qty, reorder_level</span>
+        <button className="btn btn-primary btn-sm" data-tour="scan" onClick={() => setScanOpen(true)}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" />
+          </svg>
+          Scan &amp; count
+        </button>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Import a CSV, or enroll products by photo and count them with the webcam</span>
       </div>
+
+      {scanOpen && <CameraScan uid={uid} onClose={() => setScanOpen(false)} onApplied={() => setReload(r => r + 1)} />}
 
       {loading ? (
         <div style={{ textAlign: 'center', padding: 60 }}><span className="spinner" /></div>
       ) : !hasData ? (
-        <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--muted)' }}>
-          No inventory yet — import a stock snapshot to see valuation, margins, and low-stock alerts.
-        </div>
+        <EmptyState title="No inventory yet" kpis={['Value at cost', 'SKUs', 'Low stock']}
+          message="Import a stock snapshot (sku, product, unit_cost, unit_price, stock_qty, reorder_level) to see valuation, per-SKU margins, and low-stock alerts." />
       ) : (
         <>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>

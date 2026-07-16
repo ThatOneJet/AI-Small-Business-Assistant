@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text
 from sqlalchemy.orm import relationship, declarative_base, sessionmaker
 from datetime import datetime
 import os, sys
@@ -279,6 +279,20 @@ class InventoryData(Base):
     reorder_level = Column(Float, default=0.0)
     source        = Column(String, default="upload")
     created_at    = Column(DateTime, default=datetime.utcnow)
+
+
+class EnrolledEmbedding(Base):
+    """Reference image embeddings for visual product recognition (enroll-by-photo).
+    Multiple rows per SKU (several reference angles); a scanned frame is matched
+    against the best (max cosine similarity) of a user's enrolled embeddings."""
+    __tablename__ = "enrolled_embedding"
+
+    id         = Column(Integer, primary_key=True)
+    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False)
+    sku        = Column(String, nullable=True)
+    product    = Column(String, nullable=True)
+    vec        = Column(Text, nullable=False)    # JSON list of 384 floats (L2-normalized)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class ReviewData(Base):

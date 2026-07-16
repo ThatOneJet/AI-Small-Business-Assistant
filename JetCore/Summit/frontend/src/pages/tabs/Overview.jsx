@@ -88,7 +88,7 @@ export default function Overview({ uid, onNavigate }) {
           </div>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
+        <div data-tour="cards" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
           {present.map(c => (
             <StatCard key={c.key} card={c} data={summary[c.key]} onNavigate={onNavigate} />
           ))}

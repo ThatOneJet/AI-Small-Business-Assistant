@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 from dotenv import load_dotenv
 from sqlalchemy import func, or_, and_
 import os
@@ -34,7 +34,7 @@ from models import (
     Recommendation, UsageLog, APICredential,
     ShiftData, TenderData, SalesData, TransactionData,
     ExpenseData, InventoryData, ReviewData, BusinessProfile,
-    UserSettings, Workspace, init_db, get_db
+    UserSettings, Workspace, EnrolledEmbedding, init_db, get_db
 )
 
 REACT_DIR = os.path.join(_BASE_DIR, "static", "react")
@@ -2530,6 +2530,226 @@ def get_inventory(user_id):
         })
     finally:
         db.close()
+
+
+# ── Visual product recognition (enroll-by-photo → live webcam scan & count) ────
+
+def _enroll_slug(name):
+    """Derive a stable-ish SKU from a product name when none is given."""
+    s = _re.sub(r"[^A-Za-z0-9]+", "-", (name or "").strip()).strip("-").upper()
+    return s[:24] or "ITEM"
+
+
+def _load_enrolled(user_id):
+    """Enrolled reference embeddings for a user: [{sku, product, vec[list]}]."""
+    db = get_db()
+    try:
+        rows = db.query(EnrolledEmbedding).filter_by(user_id=user_id).all()
+        out = []
+        for r in rows:
+            try:
+                out.append({"sku": r.sku, "product": r.product, "vec": json.loads(r.vec)})
+            except Exception:
+                continue
+        return out
+    finally:
+        db.close()
+
+
+@app.route("/api/inventory/enroll/<int:user_id>", methods=["POST"])
+def inventory_enroll(user_id):
+    """Enroll a product for visual recognition. Accepts uploaded image files
+    (field 'file', repeatable) and/or grabs N frames from the live webcam
+    (form 'camera_frames'). Stores one EnrolledEmbedding row per reference and
+    auto-creates the InventoryData item if it doesn't exist yet."""
+    from analysis import vision_embed as ve
+    if not ve.available():
+        return jsonify({"error": "Recognition model not installed (models/dinov2_small.onnx)."}), 503
+    sku     = (request.form.get("sku") or "").strip() or None
+    product = (request.form.get("product") or "").strip() or None
+    if not (sku or product):
+        return jsonify({"error": "Provide a product name (and optionally a SKU)."}), 400
+    if not sku:
+        sku = _enroll_slug(product)
+
+    vecs = []
+    for f in request.files.getlist("file"):
+        try:
+            v = ve.embed(f.read())
+            if v is not None:
+                vecs.append(v)
+        except Exception:
+            continue
+
+    n_cam = 0
+    try:
+        n_cam = int(request.form.get("camera_frames") or 0)
+    except (TypeError, ValueError):
+        n_cam = 0
+    if n_cam > 0:
+        from analysis import camera
+        grabbed = 0
+        for _ in range(max(1, min(n_cam, 8)) * 3):   # oversample; keep distinct frames
+            frame = camera.latest_frame()
+            if frame is not None:
+                vecs.append(ve.embed_frame(ve.crop_roi(frame)))   # only the ROI hitbox
+                grabbed += 1
+                if grabbed >= n_cam:
+                    break
+            time.sleep(0.18)
+
+    if not vecs:
+        return jsonify({"error": "No usable images. Point the camera at the product, or upload photos."}), 400
+
+    db = get_db()
+    try:
+        for v in vecs:
+            db.add(EnrolledEmbedding(
+                user_id=user_id, sku=sku, product=product or sku,
+                vec=json.dumps([round(float(x), 6) for x in v.tolist()]),
+            ))
+        inv = db.query(InventoryData).filter_by(user_id=user_id, sku=sku).first()
+        if inv is None and product:
+            inv = db.query(InventoryData).filter_by(user_id=user_id, product=product).first()
+        if inv is None:
+            db.add(InventoryData(user_id=user_id, sku=sku, product=product or sku,
+                                 stock_qty=0.0, source="enroll"))
+        db.commit()
+        ref_count = db.query(EnrolledEmbedding).filter_by(user_id=user_id, sku=sku).count()
+    finally:
+        db.close()
+    return jsonify({"sku": sku, "product": product or sku,
+                    "added": len(vecs), "ref_count": ref_count})
+
+
+@app.route("/api/inventory/enrolled/<int:user_id>", methods=["GET"])
+def inventory_enrolled(user_id):
+    """List enrolled products with how many reference photos each has."""
+    db = get_db()
+    try:
+        rows = db.query(EnrolledEmbedding).filter_by(user_id=user_id).all()
+    finally:
+        db.close()
+    agg = {}
+    for r in rows:
+        k = r.sku or r.product
+        if k not in agg:
+            agg[k] = {"sku": r.sku, "product": r.product, "ref_count": 0}
+        agg[k]["ref_count"] += 1
+    return jsonify({"enrolled": sorted(agg.values(), key=lambda x: (x["product"] or "").lower())})
+
+
+@app.route("/api/inventory/enroll/<int:user_id>/<path:sku>", methods=["DELETE"])
+def inventory_unenroll(user_id, sku):
+    """Remove all reference embeddings for a product."""
+    db = get_db()
+    try:
+        n = db.query(EnrolledEmbedding).filter_by(user_id=user_id, sku=sku).delete()
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"deleted": n})
+
+
+@app.route("/api/inventory/recognize/<int:user_id>", methods=["POST"])
+def inventory_recognize(user_id):
+    """Recognize ONE frame against this user's enrolled products.
+    Frame source (in priority): uploaded 'file' → JSON 'image' (base64/data-URL)
+    → the latest live webcam frame. Returns {sku, product, score, matched}."""
+    from analysis import vision_embed as ve
+    if not ve.available():
+        return jsonify({"error": "Recognition model not installed.", "matched": False}), 503
+    vec = None
+    if "file" in request.files:
+        vec = ve.embed(request.files["file"].read())
+    else:
+        body = request.get_json(silent=True) or {}
+        b64 = body.get("image")
+        if b64:
+            import base64
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            try:
+                vec = ve.embed(base64.b64decode(b64))
+            except Exception:
+                vec = None
+        else:
+            from analysis import camera
+            frame = camera.latest_frame()
+            if frame is None:
+                return jsonify({"error": "No camera frame available.", "matched": False,
+                                "sku": None, "product": None, "score": 0.0}), 200
+            vec = ve.embed_frame(ve.crop_roi(frame))   # only the ROI hitbox
+    if vec is None:
+        return jsonify({"error": "Could not read image.", "matched": False,
+                        "sku": None, "product": None, "score": 0.0}), 200
+    res = ve.match(vec, _load_enrolled(user_id))
+    return jsonify(res)
+
+
+@app.route("/api/inventory/count/<int:user_id>", methods=["POST"])
+def inventory_count(user_id):
+    """Apply a scanned tally to inventory. Body: {"items":[{sku, delta, product?}]}
+    or a bare list. Increments InventoryData.stock_qty per item (single-item
+    upsert — does NOT replace the snapshot like the CSV upload does)."""
+    body = request.get_json(silent=True)
+    items = body.get("items") if isinstance(body, dict) else body
+    if not isinstance(items, list):
+        return jsonify({"error": "Expected a list of {sku, delta}."}), 400
+    db = get_db()
+    updated = []
+    try:
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sku   = (it.get("sku") or "").strip()
+            delta = _safe_float(it.get("delta"))
+            if not sku or not delta:
+                continue
+            inv = db.query(InventoryData).filter_by(user_id=user_id, sku=sku).first()
+            if inv is None:
+                inv = InventoryData(user_id=user_id, sku=sku,
+                                    product=(it.get("product") or sku), stock_qty=0.0,
+                                    source="count")
+                db.add(inv)
+            inv.stock_qty = (inv.stock_qty or 0) + delta
+            updated.append({"sku": sku, "product": inv.product, "stock_qty": inv.stock_qty})
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({"updated": updated})
+
+
+# ── Live webcam stream (server-side capture → MJPEG for the localhost page) ─────
+
+@app.route("/api/camera/stream")
+def camera_stream():
+    from analysis import camera
+    return Response(camera.mjpeg_generator(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/api/camera/snapshot")
+def camera_snapshot():
+    """Current frame as a JPEG. ?roi=1 returns just the ROI hitbox crop — used by
+    the enroll UI so a captured reference matches what the scanner will embed."""
+    from analysis import camera
+    roi = request.args.get("roi") in ("1", "true", "yes")
+    if not roi:
+        return Response(camera.latest_jpeg(), mimetype="image/jpeg")
+    import cv2
+    from analysis import vision_embed as ve
+    frame = camera.latest_frame()
+    if frame is None:
+        return Response(camera.latest_jpeg(), mimetype="image/jpeg")   # placeholder
+    ok, buf = cv2.imencode(".jpg", ve.crop_roi(frame), [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    return Response(buf.tobytes() if ok else b"", mimetype="image/jpeg")
+
+
+@app.route("/api/camera/status")
+def camera_status():
+    from analysis import camera
+    return jsonify(camera.status())
 
 
 # ── Reviews ───────────────────────────────────────────────────────────────────

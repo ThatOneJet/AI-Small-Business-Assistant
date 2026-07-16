@@ -76,7 +76,7 @@ export default function AskAI({ uid }) {
   }
 
   return (
-    <div className="card" style={{ padding: '14px 16px', marginBottom: 14 }}>
+    <div className="card" data-tour="chat" style={{ padding: '14px 16px', marginBottom: 14 }}>
       <style>{`@keyframes aibounce{0%,80%,100%{transform:translateY(0);opacity:.4}40%{transform:translateY(-4px);opacity:1}} .ai-dot{width:6px;height:6px;border-radius:50%;background:var(--acc-hi,#ff6161);display:inline-block;animation:aibounce 1.2s infinite ease-in-out}`}</style>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--acc-hi, #ff6161)' }}>
@@ -89,7 +89,7 @@ export default function AskAI({ uid }) {
           {llmOn ? 'AI model online' : 'basic mode'}
         </span>
         <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>Deeper dives on any topic, using your data</span>
-        <button className="btn btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setOpen(o => !o)}>
+        <button className="btn btn-primary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setOpen(o => !o)}>
           {open ? 'Close' : 'Open chat'}
         </button>
       </div>

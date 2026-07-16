@@ -56,7 +56,7 @@ export default function BusinessProfile({ uid, onSaved }) {
   const goalLabel = (GOALS.find(g => g[0] === (p.goal || 'balance')) || [])[1]
 
   return (
-    <div className="card" style={{ padding: '14px 16px', marginBottom: 14 }}>
+    <div className="card" data-tour="profile" style={{ padding: '14px 16px', marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--acc-hi, #ff6161)' }}>
           <path d="M3 21h18M4 21V10l8-6 8 6v11M9 21v-6h6v6" />
@@ -67,7 +67,7 @@ export default function BusinessProfile({ uid, onSaved }) {
             ? `${p.name || 'Your business'}${industryLabel ? ' · ' + industryLabel : ''} · ${goalLabel}`
             : 'Tell the AI about your business for sharper, tailored suggestions'}
         </span>
-        <button className="btn btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setOpen(o => !o)}>
+        <button className="btn btn-primary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setOpen(o => !o)}>
           {open ? 'Close' : (p.configured ? 'Edit' : 'Set up')}
         </button>
       </div>

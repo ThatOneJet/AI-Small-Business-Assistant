@@ -4,6 +4,7 @@ import {
 } from 'recharts'
 import { api } from '../../api'
 import UploadButton from './UploadButton'
+import EmptyState from './EmptyState'
 
 const STAR_COLORS = { 5: '#3fb950', 4: '#7bc96f', 3: '#d29922', 2: '#f0883e', 1: '#e5534b' }
 
@@ -64,9 +65,8 @@ export default function Reviews({ uid, range = '0' }) {
       {loading ? (
         <div style={{ textAlign: 'center', padding: 60 }}><span className="spinner" /></div>
       ) : !hasData ? (
-        <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--muted)' }}>
-          No reviews yet — import a reviews export to see average rating, star distribution, and your best/worst products.
-        </div>
+        <EmptyState title="No reviews yet" kpis={['Avg rating', 'Reviews', 'Positive %']}
+          message="Import a reviews export (date, product, rating, review_text) to see your average rating, the star distribution, and your best- and worst-rated products." />
       ) : (
         <>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>

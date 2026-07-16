@@ -42,15 +42,41 @@ _SYSTEM = (
     "exact names given. Never invent figures.\n"
     "4. Be concrete and quantified — name the product, the dollar amount, the %. Skip generic filler "
     "like 'analyze your demographics' or 'enhance your marketing'.\n"
-    "5. ALWAYS end with exactly ONE specific follow-up question about their situation that would let "
-    "you give sharper, more tailored advice — ask about their exact setup (supplier terms, their "
-    "process, a specific product's cost, their timeline/goal), never a generic question. Phrase it so "
-    "it's clear you'll go deeper once they answer. Put it on its own final line starting with 'To go deeper: '."
+    "5. IDENTIFY things from the data yourself — do NOT ask the owner for anything you can work out from "
+    "it. Best/worst sellers, per-product margins, low-stock items, spend by category, ratings, what's "
+    "driving a number, fast vs slow movers — all of that is in the BUSINESS DATA below, so state it "
+    "directly (with the numbers) instead of asking. Assume they want you to do the analysis.\n"
+    "6. Only end with a follow-up question if you genuinely need something that is NOT in the data — a "
+    "goal, a plan, an external fact (a supplier's contract terms, an upcoming change), or which option "
+    "they'd prefer. If the data already covers what's needed, skip the question and instead offer to go "
+    "deeper on one specific area. Put that final line after 'To go deeper: '.\n"
+    "7. VARY YOUR WORDING. If a similar question comes up again, paraphrase — change your opening, "
+    "sentence structure, and word choice so no two answers read the same. Never repeat a canned phrasing."
 )
 
 
 def _money(n):
     return "$" + format(float(n or 0), ",.2f")
+
+
+# ── Phrasing variety ─────────────────────────────────────────────────────────
+# Never answer the same question the same way twice: each answer site offers a few
+# equivalent phrasings, and V() picks one while avoiding the one it used last time
+# for that site — so repeat questions get genuinely paraphrased (same facts, fresh
+# wording). Numbers are computed identically; only the sentence changes.
+_recent = {}
+
+
+def V(key, *variants):
+    variants = [v for v in variants if v]
+    if not variants:
+        return ""
+    if len(variants) == 1:
+        return variants[0]
+    pool = [v for v in variants if v != _recent.get(key)] or list(variants)
+    pick = random.choice(pool)
+    _recent[key] = pick
+    return pick
 
 
 # Safety net: scrub common profanity from model output (the system prompt is the
@@ -76,9 +102,16 @@ _BIZ_HINT = re.compile(
     r"customer|market|product|cash|labor|staff|hire|business|store|shop|order|resell|distribut|"
     r"produc|invoice|budget|tax|payroll|discount|brand|\bads?\b|advertis|competitor)\b", re.I)
 
-_DECLINE = ("I'm your business advisor, so I'll keep us focused on running and growing your company. "
-            "Happy to dig into your sales, costs, inventory, pricing, cash flow, hiring, or strategy — "
-            "what would you like to work on?")
+def _decline():
+    return V('decline',
+        "I'm your business advisor, so I'll keep us focused on running and growing your company. "
+        "Happy to dig into your sales, costs, inventory, pricing, cash flow, hiring, or strategy — "
+        "what would you like to work on?",
+        "That's outside what I do — I'm here for your business. Let's put that energy into your "
+        "numbers instead: sales, margins, expenses, inventory, pricing, or where to grow next. "
+        "What should we look at?",
+        "I'll stay in my lane as your business partner on this one. But point me at your sales, "
+        "costs, stock, pricing, or cash flow and I'll dig right in — what's on your mind?")
 
 
 def _off_topic(q):
@@ -110,7 +143,10 @@ def _llm_chat(messages, timeout=90):
         "messages": [{"role": "system", "content": _SYSTEM}] + messages,
         "stream": False,
         "keep_alive": "30m",   # keep the model warm so answers stay fast
-        "options": {"temperature": 0.5, "num_ctx": 4096, "num_predict": 240},
+        # Higher temperature + a fresh random seed each call so the same question
+        # never comes back with the exact same phrasing. num_predict kept tight for speed.
+        "options": {"temperature": 0.85, "top_p": 0.92, "seed": random.randint(1, 2_000_000_000),
+                    "num_ctx": 3072, "num_predict": 190},
     }).encode()
     try:
         req = urllib.request.Request(OLLAMA_URL + "/api/chat", data=payload,
@@ -188,20 +224,218 @@ def _llm_answer(db, uid, question, history):
     return _scrub(out) if out else out
 
 
+def _need_line(label):
+    return f"You haven't uploaded {label} yet — import it and I'll answer this straight from your numbers."
+
+
+def _data_query(db, uid, q):
+    """Answer factual / analytical questions by COMPUTING from the data (instant and
+    exact) — 'which product has the lowest margin', 'how much did I spend on rent',
+    'what's my best seller', totals, counts, low-stock, etc. Returns a string, or
+    None to defer to the LLM (for open-ended advice)."""
+    ql = q.lower()
+    lo = bool(re.search(r'\b(lowest|least|worst|smallest|cheapest|thinnest|bottom|min|fewest|slowest)\b', ql))
+    hi = bool(re.search(r'\b(highest|most|best|top|largest|biggest|greatest|richest|max|fastest)\b', ql))
+    pick = lo or hi
+
+    inv = lambda: db.query(InventoryData).filter_by(user_id=uid).all()
+    def pname(i): return i.product or i.sku or '?'
+    def name_map():
+        return {(i.sku or '').strip().upper(): i.product for i in inv() if i.sku and i.product}
+    def disp(label, nm):
+        return nm.get((label or '').strip().upper(), label)
+
+    # ── INVENTORY: margin / price / cost / stock ────────────────────────────
+    if re.search(r'\bmargin|markup|profitab', ql) and pick:
+        items = inv()
+        if not items: return _need_line('inventory')
+        m = lambda i: (((i.unit_price or 0) - (i.unit_cost or 0)) / i.unit_price * 100) if i.unit_price else 0
+        r = sorted(items, key=m); p = r[0] if lo else r[-1]; o = r[-1] if lo else r[0]
+        w = 'lowest' if lo else 'highest'; wo = 'highest' if lo else 'lowest'
+        tail = f" Your {wo} is {pname(o)} at {m(o):.0f}%." if len(r) > 1 else ""
+        return V('margin_pick',
+            f"{pname(p)} has the {w} margin at {m(p):.0f}% (cost {_money(p.unit_cost)}, sells {_money(p.unit_price)}).{tail}",
+            f"Your {w}-margin product is {pname(p)} — {m(p):.0f}% ({_money(p.unit_cost)} cost, {_money(p.unit_price)} price).{tail}",
+            f"That'd be {pname(p)}: a {m(p):.0f}% margin, selling at {_money(p.unit_price)} on {_money(p.unit_cost)} cost.{tail}")
+    if re.search(r'\b(price|expensive|cheapest|priciest)\b', ql) and pick and not re.search(r'spend|expense', ql):
+        items = inv()
+        if items:
+            r = sorted(items, key=lambda i: i.unit_price or 0); p = r[0] if lo else r[-1]
+            w = 'cheapest' if lo else 'priciest'
+            return V('price_pick',
+                f"{pname(p)} is your {w} product at {_money(p.unit_price)}.",
+                f"That'd be {pname(p)} — it sells for {_money(p.unit_price)}, your {w}.",
+                f"Your {w} item is {pname(p)}, priced at {_money(p.unit_price)}.")
+    if re.search(r'\b(stock|on hand|quantity|qty|inventory)\b', ql) and pick and not re.search(r'value|worth', ql):
+        items = inv()
+        if items:
+            r = sorted(items, key=lambda i: i.stock_qty or 0); p = r[0] if lo else r[-1]
+            w = 'least' if lo else 'most'
+            return V('stock_pick',
+                f"{pname(p)} has the {w} stock at {p.stock_qty:g} units.",
+                f"You're holding the {w} of {pname(p)} — {p.stock_qty:g} units on hand.",
+                f"That's {pname(p)}: {p.stock_qty:g} units, the {w} of any SKU.")
+    if re.search(r'reorder|restock|low.{0,8}stock|stock.{0,8}low|running (low|out)|out of stock', ql):
+        items = inv()
+        if not items: return _need_line('inventory')
+        low = [i for i in items if (i.reorder_level or 0) > 0 and (i.stock_qty or 0) <= (i.reorder_level or 0)]
+        if not low:
+            return V('low_none',
+                "Nothing is at or below its reorder level right now — stock looks healthy.",
+                "You're in good shape — no items have hit their reorder point yet.",
+                "Nothing needs restocking at the moment; every SKU is above its reorder level.")
+        lst = "; ".join(f"{pname(i)} ({i.stock_qty:g} left, reorder at {i.reorder_level:g})" for i in low)
+        return V('low_list',
+            f"At or below reorder level: {lst}.",
+            f"Time to restock these: {lst}.",
+            f"{len(low)} item{'s' if len(low) != 1 else ''} need attention — {lst}.")
+
+    # ── SALES: best/worst seller, revenue, units ────────────────────────────
+    if re.search(r'\b(sell|seller|selling|sold|revenue|sales|hero|bestseller)\b', ql) and pick:
+        sales = db.query(SalesData).filter_by(user_id=uid).all()
+        if not sales: return _need_line('sales')
+        by, nm = {}, name_map()
+        for s in sales:
+            d = by.setdefault(disp(s.item, nm), [0.0, 0.0]); d[0] += s.revenue or 0; d[1] += s.quantity_sold or 0
+        idx = 1 if re.search(r'\bunits?|quantity|volume|sold the (most|least|fewest)\b', ql) else 0
+        r = sorted(by.items(), key=lambda x: x[1][idx]); p = r[0] if lo else r[-1]
+        if idx == 0:
+            w = 'weakest' if lo else 'best'
+            return V('seller_rev',
+                f"{p[0]} is your {w} seller by revenue at {_money(p[1][0])}.",
+                f"By revenue, that's {p[0]} — {_money(p[1][0])}, your {w} performer.",
+                f"Your {w} earner is {p[0]}, bringing in {_money(p[1][0])}.")
+        w = 'fewest' if lo else 'most'
+        return V('seller_units',
+            f"{p[0]} sold the {w} units at {p[1][1]:g}.",
+            f"By volume that's {p[0]}, moving {p[1][1]:g} units — your {w}.",
+            f"{p[0]} shifted {p[1][1]:g} units, the {w} of any product.")
+
+    # ── REVIEWS: best/worst rated ───────────────────────────────────────────
+    if re.search(r'\b(rat(ed|ing)|review|star)\b', ql) and pick:
+        revs = db.query(ReviewData).filter_by(user_id=uid).all()
+        if not revs: return _need_line('reviews')
+        byp = {}
+        for rv in revs:
+            d = byp.setdefault(rv.product or rv.sku or '?', [0.0, 0]); d[0] += rv.rating or 0; d[1] += 1
+        r = sorted(byp.items(), key=lambda x: x[1][0] / x[1][1]); p = r[0] if lo else r[-1]
+        avg = p[1][0] / p[1][1]; w = 'worst' if lo else 'best'
+        return V('rated_pick',
+            f"{p[0]} is your {w}-rated product at {avg:.1f} stars across {p[1][1]} reviews.",
+            f"That'd be {p[0]} — {avg:.1f} stars from {p[1][1]} reviews, your {w}.",
+            f"Customers rate {p[0]} the {w}: {avg:.1f} stars over {p[1][1]} reviews.")
+
+    # ── EXPENSES: total, spend on a category, biggest, top vendor ───────────
+    if re.search(r'\bspend|spent|expense|cost|money go', ql):
+        exp = db.query(ExpenseData).filter_by(user_id=uid).all()
+        if exp:
+            total = sum(e.amount or 0 for e in exp)
+            bycat, byv = {}, {}
+            for e in exp:
+                bycat[e.category or 'Uncategorized'] = bycat.get(e.category or 'Uncategorized', 0) + (e.amount or 0)
+                if e.description:
+                    byv[e.description] = byv.get(e.description, 0) + (e.amount or 0)
+            m2 = re.search(r'(?:on|for|in|towards?)\s+([a-z][a-z &/-]{2,28})', ql)
+            if m2:
+                key = m2.group(1).strip()
+                for c, a in bycat.items():
+                    if key in c.lower() or c.lower() in key:
+                        return V('spend_cat',
+                            f"You've spent {_money(a)} on {c} — {a/total*100:.0f}% of your {_money(total)} total.",
+                            f"{c} has cost you {_money(a)} so far, about {a/total*100:.0f}% of total spend.",
+                            f"That's {_money(a)} on {c} ({a/total*100:.0f}% of {_money(total)}).")
+            if hi or re.search(r'biggest|largest|most|top', ql):
+                if byv and re.search(r'vendor|supplier|payee', ql):
+                    v, a = max(byv.items(), key=lambda x: x[1])
+                    return V('spend_vendor',
+                        f"Your largest payee is {v} at {_money(a)}.",
+                        f"You pay {v} the most — {_money(a)} in total.",
+                        f"{v} is your biggest single payee at {_money(a)}.")
+                c, a = max(bycat.items(), key=lambda x: x[1])
+                return V('spend_big',
+                    f"Your biggest expense is {c} at {_money(a)} ({a/total*100:.0f}% of {_money(total)} total spend).",
+                    f"{c} is where most of your money goes — {_money(a)}, {a/total*100:.0f}% of {_money(total)}.",
+                    f"Top of your cost list is {c}: {_money(a)}, {a/total*100:.0f}% of the {_money(total)} total.")
+            if re.search(r'total|how much|overall|money go', ql):
+                top = ", ".join(f"{c} {_money(a)}" for c, a in sorted(bycat.items(), key=lambda x: -x[1])[:3])
+                return V('spend_total',
+                    f"Total spend is {_money(total)}. Biggest categories: {top}.",
+                    f"You've spent {_money(total)} in all — led by {top}.",
+                    f"That comes to {_money(total)} total; your top buckets are {top}.")
+
+    # ── TOTALS / averages / counts ──────────────────────────────────────────
+    if re.search(r'(total|how much).*(revenue|sales|made|earn)', ql) or re.search(r'revenue.*total', ql):
+        sales = db.query(SalesData).filter_by(user_id=uid).all()
+        if sales:
+            o = len(set(s.check_number for s in sales if s.check_number)) or len(sales)
+            rev = _money(sum(s.revenue or 0 for s in sales))
+            return V('rev_total',
+                f"Total revenue is {rev} across {o} orders.",
+                f"You've brought in {rev} over {o} orders.",
+                f"Sales come to {rev} from {o} orders.")
+    if re.search(r'average order|\baov\b|avg order', ql):
+        sales = db.query(SalesData).filter_by(user_id=uid).all()
+        if sales:
+            tot = sum(s.revenue or 0 for s in sales); o = len(set(s.check_number for s in sales if s.check_number)) or len(sales)
+            return V('aov',
+                f"Average order value is {_money(tot/o)} over {o} orders.",
+                f"Your customers spend {_money(tot/o)} per order on average ({o} orders).",
+                f"AOV sits at {_money(tot/o)} across {o} orders.")
+    if re.search(r'average rating|avg rating|overall rating', ql):
+        revs = db.query(ReviewData).filter_by(user_id=uid).all()
+        if revs:
+            avg = sum(r.rating or 0 for r in revs) / len(revs)
+            return V('avg_rating',
+                f"Your average rating is {avg:.1f} stars over {len(revs)} reviews.",
+                f"You're averaging {avg:.1f} stars across {len(revs)} reviews.",
+                f"Customers give you {avg:.1f} stars on average ({len(revs)} reviews).")
+    if re.search(r'how many|number of|count of', ql):
+        if re.search(r'sku|product|item', ql):
+            items = inv()
+            if items:
+                return V('count_sku',
+                    f"You have {len(items)} SKUs in inventory.",
+                    f"There are {len(items)} products in your catalog.",
+                    f"Your inventory holds {len(items)} SKUs.")
+        if re.search(r'order|sale', ql):
+            sales = db.query(SalesData).filter_by(user_id=uid).all()
+            if sales:
+                n = len(set(s.check_number for s in sales if s.check_number)) or len(sales)
+                return V('count_orders',
+                    f"You have {n} orders.",
+                    f"That's {n} orders on record.",
+                    f"Your sales cover {n} orders.")
+        if re.search(r'review', ql):
+            revs = db.query(ReviewData).filter_by(user_id=uid).all()
+            if revs:
+                avg = sum(r.rating or 0 for r in revs) / len(revs)
+                return V('count_reviews',
+                    f"You have {len(revs)} reviews averaging {avg:.1f} stars.",
+                    f"That's {len(revs)} reviews at {avg:.1f} stars on average.",
+                    f"You've collected {len(revs)} reviews ({avg:.1f} stars avg).")
+
+    return None
+
+
 def answer(user_id, question, pending=None, history=None):
     db = get_db()
     try:
         q = (question or "").strip()
         # Guardrail: politely decline clearly off-topic questions, business-only.
         if _off_topic(q):
-            return {"topic": "declined", "answer": _DECLINE, "pending": None}
-        # Prefer the local LLM (real language understanding) when it's up; it reads
-        # the whole message + history, grounded on the business data. Rule-based
-        # engine below is the always-available fallback.
+            return {"topic": "declined", "answer": _decline(), "pending": None}
+        # 1) Factual / analytical questions → compute the exact answer from the data.
+        #    Instant and correct (no model needed), so the AI never punts with "here's
+        #    how you'd calculate it" and response time stays low.
+        dq = _data_query(db, uid=user_id, q=q)
+        if dq:
+            return {"topic": "data", "answer": dq, "pending": None}
+        # 2) Open-ended advice → the local LLM, grounded on the data.
         if _llm_ok():
             out = _llm_answer(db, user_id, q, history)
             if out:
                 return {"topic": "llm", "answer": out, "pending": None}
+        # 3) Always-available rule-based fallback.
         return _answer(db, user_id, q, (pending or "") or None)
     finally:
         db.close()

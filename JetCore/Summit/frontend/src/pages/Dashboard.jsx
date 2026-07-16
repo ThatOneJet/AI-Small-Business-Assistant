@@ -14,6 +14,7 @@ import Admin        from './tabs/Admin'
 import Assistant    from './tabs/Assistant'
 import PricingModal from './PricingModal'
 import AddWorkspaceModal from './AddWorkspaceModal'
+import Tour, { TOUR_STEPS } from './tabs/Tour'
 import { meetsRequired } from '../planGating'
 
 // ── Icon helper ──────────────────────────────────────────────────────────────
@@ -186,6 +187,7 @@ export default function Dashboard() {
   const [tabRange,    setTabRange]    = useState({ 'Sales': '0', 'Labor': '30', 'Expenses': '0', 'Reviews': '0' })
   const [workspaces,  setWorkspaces]  = useState([])
   const [addWsOpen,   setAddWsOpen]   = useState(false)
+  const [tourOpen,    setTourOpen]    = useState(false)
   const [appSwOpen,   setAppSwOpen]   = useState(false)   // app-switcher popover
 
   const brandRef     = useRef(null)
@@ -216,6 +218,13 @@ export default function Dashboard() {
   useEffect(() => {
     document.documentElement.setAttribute('data-has-sidebar', 'true')
     return () => document.documentElement.removeAttribute('data-has-sidebar')
+  }, [])
+
+  // First-visit walkthrough (auto-start once; replayable from the "?" button).
+  useEffect(() => {
+    let done = false
+    try { done = localStorage.getItem('summit_tour_done') === '1' } catch {}
+    if (!done) { const t = setTimeout(() => setTourOpen(true), 900); return () => clearTimeout(t) }
   }, [])
 
   useEffect(() => {
@@ -337,7 +346,7 @@ export default function Dashboard() {
   // ── Nav logic ──────────────────────────────────────────────────────────────
   const logout = useCallback(() => { localStorage.clear(); nav('/login') }, [nav])
 
-  const navigate = useCallback((tab) => {
+  const navigate = useCallback((tab, instant = false) => {
     if (navHistory.current[navIdx.current] === tab) return
     navHistory.current = navHistory.current.slice(0, navIdx.current + 1)
     navHistory.current.push(tab)
@@ -345,8 +354,10 @@ export default function Dashboard() {
     setActive(tab)
     setNavTick(t => t + 1)
     setNavTick2(t => t + 1)
-    // Trigger shimmer skeleton + progress bar
+    // Trigger shimmer skeleton + progress bar — skipped for the guided tour
+    // (instant) so it can move between pages without the 380ms load stall.
     clearTimeout(tabLoadTimer.current)
+    if (instant) { setTabLoading(false); return }
     setTabLoading(true)
     tabLoadTimer.current = setTimeout(() => setTabLoading(false), 380)
   }, [])
@@ -493,7 +504,7 @@ export default function Dashboard() {
           <div className="topbar-brand">
             <span className="loc-name">{activeWs?.name || 'JetCore'}</span>
           </div>
-          <div className="topbar-items">
+          <div className="topbar-items" data-tour="nav">
             {NAV_PRIMARY.map(item => (
               <button
                 key={item.key}
@@ -517,6 +528,9 @@ export default function Dashboard() {
                 <span className="sec-lbl">{item.label}</span>
               </button>
             ))}
+            <button className="topbar-item sec" onClick={() => setTourOpen(true)} title="Take a tour">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+            </button>
             <div ref={acctRef} className="topbar-acct" onClick={toggleAcct} title={fullName || email}>
               <div className="avatar">
                 {profilePic
@@ -548,7 +562,7 @@ export default function Dashboard() {
           )}
         </header>
 
-        <div className="ch-body">
+        <div className="ch-body" data-tour="tabbody">
           {tabLoading ? (
             <SkeletonPage />
           ) : (
@@ -582,6 +596,11 @@ export default function Dashboard() {
           onClose={() => setAddWsOpen(false)}
           onCreated={handleWsCreated}
         />
+      )}
+
+      {tourOpen && (
+        <Tour steps={TOUR_STEPS} active={active} onNavigate={navigate}
+          onClose={() => setTourOpen(false)} />
       )}
 
     </div>

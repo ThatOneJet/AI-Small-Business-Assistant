@@ -115,7 +115,7 @@ export default function AIOptimize({ uid, refreshKey }) {
   const fewer = sel.filter(k => k !== 'all').length > 0 && sel.filter(k => k !== 'all').length <= 2
 
   return (
-    <div style={{ marginBottom: 18 }}>
+    <div data-tour="optimize" style={{ marginBottom: 18 }}>
       <style>{`@keyframes twblink{0%,49%{opacity:1}50%,100%{opacity:0}} .tw-caret{animation:twblink 1s steps(1) infinite;color:var(--acc-hi,#ff6161);margin-left:1px}`}</style>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <button className="btn btn-primary" onClick={() => run(sel)} disabled={loading}

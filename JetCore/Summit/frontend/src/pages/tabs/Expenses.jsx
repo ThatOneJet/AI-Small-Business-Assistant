@@ -5,6 +5,7 @@ import {
 } from 'recharts'
 import { api } from '../../api'
 import UploadButton from './UploadButton'
+import EmptyState from './EmptyState'
 
 const BAR_COLORS = ['#e5534b', '#3fb950', '#d29922', '#58a6ff', '#a371f7', '#ec4899', '#14b8a6', '#f78166']
 const money = n => '$' + (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -62,9 +63,8 @@ export default function Expenses({ uid, range = '0' }) {
       {loading ? (
         <div style={{ textAlign: 'center', padding: 60 }}><span className="spinner" /></div>
       ) : !hasData ? (
-        <div className="card" style={{ padding: 40, textAlign: 'center', color: 'var(--muted)' }}>
-          No expenses yet — import an expense report to see spend by category, top vendors, and monthly trend.
-        </div>
+        <EmptyState title="No expenses yet" kpis={['Total spend', 'Entries', 'Top category']}
+          message="Import an expense report (date, category, vendor, amount) and this fills with spend by category, your top vendors, and the monthly trend." />
       ) : (
         <>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 18 }}>

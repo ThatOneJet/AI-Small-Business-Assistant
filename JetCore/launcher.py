@@ -16,7 +16,6 @@ import sys
 import shutil
 import subprocess
 
-# Operate on the frontend shell (one level down from this repo-root launcher).
 BASE_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend')
 NODE_MODULES = os.path.join(BASE_DIR, 'node_modules')
 ELECTRON_BIN = os.path.join(NODE_MODULES, 'electron', 'dist',
@@ -29,7 +28,6 @@ def npm_cmd():
     return shutil.which('npm.cmd') or shutil.which('npm') or 'npm'
 
 
-# ── Free ONLY the process bound to our own dev port ──────────────────────────
 
 def free_port(port):
     """Kill just the PID listening on `port`. Never a kill-by-name."""
@@ -64,7 +62,6 @@ def free_port(port):
         print(f'[JetCore] Port-free skipped: {e}')
 
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
 
 def ensure_deps():
     npm = npm_cmd()
@@ -86,7 +83,6 @@ def ensure_deps():
             sys.exit(1)
 
 
-# ── Run ──────────────────────────────────────────────────────────────────────
 
 def main():
     free_port(VITE_PORT)

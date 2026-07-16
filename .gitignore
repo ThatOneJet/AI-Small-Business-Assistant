@@ -36,3 +36,6 @@ backend.out
 # ── OS / editor ────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# Unused fallback model (DINOv2 is the one in use); kept locally, not versioned
+JetCore/Summit/models/resnet50.onnx
