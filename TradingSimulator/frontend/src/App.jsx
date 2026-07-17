@@ -19,6 +19,8 @@ import AnalysisPanel from './components/AnalysisPanel.jsx'
 import RiskPanel from './components/RiskPanel'
 import OptionsPanel from './components/OptionsPanel'
 import AILogPanel from './components/AILogPanel'
+import AIChatPanel from './components/AIChatPanel.jsx'
+import AIInsights from './components/AIInsights.jsx'
 import ArbitragePanel from './components/ArbitragePanel.jsx'
 import RankingsPanel from './components/RankingsPanel.jsx'
 import AIActivityTicker from './components/AIActivityTicker.jsx'
@@ -165,6 +167,7 @@ export default function App() {
             { key: 'options',  label: 'Options'  },
             { key: 'rankings', label: 'Rank'     },
             { key: 'aiscan',   label: 'AI Scan'  },
+            { key: 'chat',     label: 'Chat'     },
             { key: 'arb',      label: 'Arb'      },
           ].map(t => (
             <button
@@ -224,7 +227,18 @@ export default function App() {
             <RankingsPanel portfolioId={portfolioId} onSelect={(sym) => { setSymbol(sym); setLeftTab('watch') }} />
           )}
           {leftTab === 'aiscan' && (
-            <AILogPanel portfolioId={portfolioId} isAiControlled={true} user={user} />
+            <>
+              <AILogPanel portfolioId={portfolioId} isAiControlled={true} user={user} />
+              <AIInsights portfolioId={portfolioId} />
+            </>
+          )}
+          {leftTab === 'chat' && (
+            <div style={{ padding: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--t-3)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
+                Ask the AI · {symbol}
+              </div>
+              <AIChatPanel symbol={symbol} portfolioId={portfolioId} />
+            </div>
           )}
           {leftTab === 'arb' && (
             <ArbitragePanel portfolioId={portfolioId} />

@@ -1463,18 +1463,82 @@ def ai_chat():
         pass
     context = '\n'.join(ctx) or 'No decision data available yet.'
 
-    system = ("You ARE TradingSim's autonomous trading AI, explaining your own decisions to the trader. "
-              "You score each symbol from -10 (very bearish) to +10 (very bullish) using technical signals "
-              "(RSI, MACD, trend/ADX, Bollinger, VWAP, volume, ATR) and only BUY above +5.0. When markets are "
-              "closed you trade crypto & forex. Answer in FIRST PERSON ('I'm holding NVDA because...'), using "
-              "ONLY the DATA below. Be concise (<130 words), specific, cite the actual scores/signals/numbers, "
-              "and never invent figures. If the data doesn't cover the question, say so briefly.")
+    system = ("You ARE TradingSim's autonomous trading AI. You score each symbol from -10 (very bearish) to "
+              "+10 (very bullish) using technical signals (RSI, MACD, trend/ADX, Bollinger, VWAP, volume, ATR) "
+              "and only BUY above +5.0; when the stock market is closed you trade crypto & forex, and you never "
+              "hold stocks overnight (gap risk). Answer the trader's question:\n"
+              "- If it's about YOUR decision or a specific symbol, answer in FIRST PERSON using ONLY the DATA "
+              "below, citing the actual scores/signals/numbers (never invent figures).\n"
+              "- If it's a general question about how markets, indicators, or trading work, explain it clearly "
+              "and accurately, like a seasoned trader teaching a beginner.\n"
+              "Be concise (<150 words), specific, and professional. This is education, not personalized "
+              "financial advice.")
     user = f"DATA:\n{context}\n\nTRADER'S QUESTION: {question}"
     ans = _ai_chat_llm(system, user)
     used_llm = bool(ans)
     if not ans:
         ans = "My local chat model is offline right now, so here's my current data directly:\n\n" + context
     return jsonify({'answer': ans, 'grounded_on': symbol or 'portfolio', 'llm_used': used_llm})
+
+
+@app.route('/api/portfolios/<int:pid>/ai/insights')
+def ai_insights(pid):
+    """Decision analytics: what the AI ACCEPTED (with entry regime), what it REJECTED
+    (by reason), and how CLOSED trades turned out — won / lost / flat — plus per-regime
+    win rates. The specific trend/indicator/outcome data the model retrains on."""
+    days  = request.args.get('days', 7, type=int)
+    since = (datetime.utcnow() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+    with _get_db() as conn:
+        acc = conn.execute(
+            "SELECT symbol, action, score, price, market_state, reason, created_at FROM ai_log "
+            "WHERE portfolio_id=? AND action IN ('BUY','SHORT') AND created_at>=? ORDER BY id DESC LIMIT 30",
+            (pid, since)).fetchall()
+        accepted = [{'symbol': r['symbol'], 'action': r['action'], 'score': r['score'],
+                     'price': r['price'], 'regime': r['market_state'], 'reason': r['reason'],
+                     'ts': r['created_at']} for r in acc]
+        acc_total = conn.execute("SELECT COUNT(*) FROM ai_decisions WHERE portfolio_id=? AND decision='ACCEPT' AND created_at>=?", (pid, since)).fetchone()[0]
+        rej = conn.execute(
+            "SELECT reason, COUNT(*) n FROM ai_decisions WHERE portfolio_id=? AND decision='REJECT' AND created_at>=? GROUP BY reason ORDER BY n DESC LIMIT 12",
+            (pid, since)).fetchall()
+        rejected  = [{'reason': (r['reason'] or 'other'), 'count': r['n']} for r in rej]
+        rej_total = conn.execute("SELECT COUNT(*) FROM ai_decisions WHERE portfolio_id=? AND decision='REJECT' AND created_at>=?", (pid, since)).fetchone()[0]
+        closed = conn.execute(
+            "SELECT symbol, side, realized_pl, created_at FROM sim_trades WHERE portfolio_id=? "
+            "AND status='filled' AND side IN ('sell','cover') AND created_at>=? ORDER BY id DESC",
+            (pid, since)).fetchall()
+        entry_regime = {}
+        for r in conn.execute("SELECT symbol, market_state FROM ai_log WHERE portfolio_id=? AND action IN ('BUY','SHORT') AND created_at>=? ORDER BY id", (pid, since)):
+            entry_regime[r['symbol']] = r['market_state']
+
+    buckets = {'won': [], 'lost': [], 'flat': []}
+    for r in closed:
+        pl = r['realized_pl'] or 0
+        b  = 'won' if pl > 1 else 'lost' if pl < -1 else 'flat'
+        buckets[b].append({'symbol': r['symbol'], 'pl': round(pl, 2), 'ts': r['created_at'],
+                           'regime': entry_regime.get(r['symbol'], '')})
+
+    def summ(lst):
+        return {'count': len(lst), 'total_pl': round(sum(t['pl'] for t in lst), 2),
+                'avg_pl': round(sum(t['pl'] for t in lst) / len(lst), 2) if lst else 0,
+                'trades': lst[:15]}
+
+    reg = {}
+    for b in ('won', 'lost', 'flat'):
+        for t in buckets[b]:
+            g = t['regime'] or 'unknown'
+            reg.setdefault(g, [0, 0, 0.0]); reg[g][0] += 1
+            if b == 'won': reg[g][1] += 1
+            reg[g][2] += t['pl']
+    by_regime = [{'regime': g, 'trades': n, 'win_rate': round(w * 100 / n) if n else 0, 'total_pl': round(pl, 2)}
+                 for g, (n, w, pl) in sorted(reg.items(), key=lambda x: -x[1][0])]
+
+    return jsonify({
+        'days': days,
+        'accepted': accepted, 'accepted_total': acc_total,
+        'rejected': rejected, 'rejected_total': rej_total,
+        'outcomes': {'won': summ(buckets['won']), 'lost': summ(buckets['lost']), 'flat': summ(buckets['flat'])},
+        'by_regime': by_regime,
+    })
 
 
 @app.route('/api/portfolios/<int:pid>/ai/scan/suggestions')
@@ -5634,6 +5698,33 @@ def _ai_run_portfolio(pid: int) -> dict:
                 atr    = data.get('atr') or (price * 0.02)
                 tradeable = market_open or _is_fractional_asset(sym)
 
+                # ── OVERNIGHT GAP PROTECTION ──────────────────────────────────
+                # Never hold an equity into a CLOSED market. While it's closed the
+                # stop/target logic below can't fire, so an opening gap becomes an
+                # unmanaged loss — this is exactly how the account bled overnight on
+                # stocks. The moment the market is closed, flatten every equity at
+                # the last price (crypto/forex are 24/7 fractional, so they're exempt
+                # and keep trading normally).
+                if (not market_open) and (not _is_fractional_asset(sym)):
+                    try:
+                        _q = abs(row['shares'])
+                        _fill = _apply_slippage(price, 'buy' if is_short else 'sell', atr,
+                                                data.get('volume_ratio', 1.0), _q)
+                        if is_short:
+                            _sim_cover(sym, _q, _fill, pid)
+                        else:
+                            _sim_sell(sym, row['shares'], _fill, pid)
+                        (summary['covered'] if is_short else summary['sold']).append(
+                            {'symbol': sym, 'price': round(_fill, 2), 'score': score,
+                             'reason': 'overnight_flat', 'market_state': detail.get('market_state', ''),
+                             'type': 'cover' if is_short else 'sell'})
+                        _ai_log_entry(pid, sym, 'COVER' if is_short else 'SELL', score, _fill, _q,
+                                      'flattened equity — no overnight gap risk',
+                                      market_state=detail.get('market_state', ''))
+                    except Exception as _e:
+                        summary['errors'].append(f'overnight_flat {sym}: {_e}')
+                    continue
+
                 if is_short:
                     # ── Short position: trailing stop trails DOWN as price falls ──
                     short_qty    = abs(row['shares'])
@@ -6388,6 +6479,29 @@ def _ai_worker():
         _time.sleep(_AI_INTERVAL)
 
 threading.Thread(target=_ai_worker, daemon=True, name='ai-trader').start()
+
+
+# ── Hourly auto-retrain ────────────────────────────────────────────────────────
+_AUTO_RETRAIN_INTERVAL = 3600   # retrain BOTH heads every hour on newly-closed outcomes
+
+def _auto_retrain_worker():
+    import trading_model
+    _time.sleep(_AUTO_RETRAIN_INTERVAL)   # first pass after an hour (let real samples accrue)
+    while True:
+        try:
+            if not _retrain_state.get('running'):
+                _retrain_state.update(running=True, started_at=_time.time())
+                try:
+                    _retrain_state['last_result'] = trading_model.train()
+                    print('[AI] hourly auto-retrain done:', _retrain_state['last_result'], flush=True)
+                finally:
+                    _retrain_state['running'] = False
+        except Exception as e:
+            _retrain_state['running'] = False
+            print('[AI] auto-retrain error:', e, flush=True)
+        _time.sleep(_AUTO_RETRAIN_INTERVAL)
+
+threading.Thread(target=_auto_retrain_worker, daemon=True, name='auto-retrain').start()
 
 
 # ── Arbitrage worker ──────────────────────────────────────────────────────────
