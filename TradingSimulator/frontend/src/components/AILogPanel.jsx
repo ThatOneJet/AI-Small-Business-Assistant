@@ -528,6 +528,7 @@ export default function AILogPanel({ portfolioId, isAiControlled, user }) {
   const prevCountRef = useRef(0)
   const [retraining, setRetraining] = useState(false)
   const [retrainMsg, setRetrainMsg] = useState('')
+  const [aiStatus,   setAiStatus]   = useState(null)  // slim "AI is learning" meter
 
   function handleRetrain() {
     setRetraining(true); setRetrainMsg('')
@@ -591,6 +592,21 @@ export default function AILogPanel({ portfolioId, isAiControlled, user }) {
     const id = setInterval(load, isAiControlled ? 10000 : 30000)
     return () => { cancelled = true; clearInterval(id) }
   }, [portfolioId, isAiControlled])
+
+  // Slim "AI is learning" meter — polls model status independently so it never
+  // interferes with the scans/log/countdown loops above.
+  useEffect(() => {
+    if (!portfolioId) return
+    let alive = true
+    const load = () => {
+      api.get('/ai/status', { params: { portfolio_id: portfolioId } })
+        .then(r => { if (alive) setAiStatus(r.data) })
+        .catch(() => {})
+    }
+    load()
+    const id = setInterval(load, 30000)
+    return () => { alive = false; clearInterval(id) }
+  }, [portfolioId])
 
   const lastRun  = runs[0] ?? null
   const totalBought = runs.reduce((s, r) => s + (r.bought_count || 0), 0)
@@ -684,6 +700,26 @@ export default function AILogPanel({ portfolioId, isAiControlled, user }) {
               </button>
             )}
           </div>
+
+          {/* AI is learning — slim meter toward the 200-sample milestone */}
+          {aiStatus && aiStatus.real_samples != null && (() => {
+            const real = Number(aiStatus.real_samples || 0)
+            const pct  = Math.min(100, Math.round((real / 200) * 100))
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                <span style={{ fontSize: 8.5, color: 'var(--t-4)', whiteSpace: 'nowrap' }}>
+                  <span style={{ color: '#b39dff', fontWeight: 700, letterSpacing: '0.04em' }}>AI learning</span>
+                  {' · '}Learned from{' '}
+                  <span style={{ color: 'var(--t-2)', fontFamily: 'var(--font-mono)', fontWeight: 700 }}>{real}</span>
+                  {' '}closed trades
+                </span>
+                <div style={{ flex: 1, minWidth: 30, height: 3, borderRadius: 2, background: 'rgba(140,170,220,0.08)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${pct}%`, background: 'linear-gradient(90deg, #b39dff, #3ddc97)', borderRadius: 2, transition: 'width 0.5s ease' }} />
+                </div>
+                <span style={{ fontSize: 8, fontFamily: 'var(--font-mono)', color: 'var(--t-4)', flexShrink: 0 }}>{real}/200</span>
+              </div>
+            )
+          })()}
         </div>
 
         {/* ── Tab switcher ── */}

@@ -100,6 +100,20 @@ export default function ArbitragePanel({ portfolioId }) {
     catch { setAutoOn(!next) }
   }
 
+  const [clearing, setClearing] = useState(false)
+  const clearHistory = async () => {
+    if (clearing || !portfolioId) return
+    // Realized profit stays in your balance — this only clears the history log to free memory.
+    if (!window.confirm('Clear arbitrage history? Booked profit stays in your balance; only the log is removed.')) return
+    setClearing(true)
+    try {
+      await api.delete(`/portfolios/${portfolioId}/arbitrage/trades`)
+      setTrades([])
+      prevCountRef.current = 0
+    } catch { /* keep existing on failure */ }
+    finally { setClearing(false) }
+  }
+
   useEffect(() => {
     if (!portfolioId) return
     let cancelled = false
@@ -218,8 +232,25 @@ export default function ArbitragePanel({ portfolioId }) {
 
         {/* ── Executed log ── */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px' }}>
-          <div style={{ fontSize: 8.5, fontWeight: 700, color: 'var(--t-4)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 6 }}>
-            Executed
+          <div style={{ display: 'flex', alignItems: 'center', marginBottom: 6 }}>
+            <span style={{ fontSize: 8.5, fontWeight: 700, color: 'var(--t-4)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+              Executed
+            </span>
+            {trades.length > 0 && (
+              <button
+                onClick={clearHistory}
+                disabled={clearing}
+                title="Clear arbitrage history to free memory (booked profit stays in your balance)"
+                style={{
+                  marginLeft: 'auto', padding: '1px 8px', borderRadius: 4, cursor: clearing ? 'default' : 'pointer',
+                  fontSize: 8.5, fontWeight: 700, letterSpacing: '0.06em', fontFamily: 'var(--font-mono)',
+                  background: 'transparent', color: clearing ? 'var(--t-4)' : '#ff476f',
+                  border: '1px solid rgba(255,71,111,0.3)',
+                }}
+              >
+                {clearing ? 'CLEARING…' : 'CLEAR'}
+              </button>
+            )}
           </div>
 
           {loading && trades.length === 0 && (

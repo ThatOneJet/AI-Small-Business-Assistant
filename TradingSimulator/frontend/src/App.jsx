@@ -20,8 +20,11 @@ import RiskPanel from './components/RiskPanel'
 import OptionsPanel from './components/OptionsPanel'
 import AILogPanel from './components/AILogPanel'
 import ArbitragePanel from './components/ArbitragePanel.jsx'
-import TradeBrief from './components/TradeBrief.jsx'
 import RankingsPanel from './components/RankingsPanel.jsx'
+import AIActivityTicker from './components/AIActivityTicker.jsx'
+import AITopPicks from './components/AITopPicks.jsx'
+import AIVerdictPill from './components/AIVerdictPill.jsx'
+import AIToasts from './components/AIToasts.jsx'
 import Settings from './pages/Settings.jsx'
 import NewsTicker from './components/NewsTicker.jsx'
 import ConfirmModal from './components/ConfirmModal.jsx'
@@ -146,7 +149,7 @@ export default function App() {
     <div className={`app-shell${railOpen ? ' rail-open' : ''}${!widgetsOpen ? ' widgets-collapsed' : ''}`}>
 
       {/* ── TitleBar: row 1, all columns ── */}
-      <TitleBar symbol={symbol} account={account} />
+      <TitleBar symbol={symbol} account={account} socket={socket} portfolioId={portfolioId} />
 
       {/* ── Left panel: row 2, col 1 ── */}
       <aside className="widgets-col">
@@ -339,6 +342,7 @@ export default function App() {
             {projectionData && (
               <div style={{ height: '26px', display: 'flex', alignItems: 'center', padding: '0 10px', gap: '10px', borderTop: '1px solid rgba(140,170,220,0.07)', background: 'rgba(0,0,0,0.1)', flexShrink: 0 }}>
                 <span style={{ fontSize: '9px', color: '#475061', letterSpacing: '0.07em', textTransform: 'uppercase' }}>Signals</span>
+                <AIVerdictPill symbol={symbol} portfolioId={portfolioId} />
                 {projectionData.regime && (
                   <span style={{ fontSize: '10px', padding: '0 6px', borderRadius: '3px', background: 'rgba(140,170,220,0.08)', color: '#aab4c5' }}>
                     {projectionData.regime.replace(/_/g, ' ')}
@@ -362,8 +366,14 @@ export default function App() {
               </div>
             )}
 
+            {/* AI presence strips — top picks + live activity ticker, alongside the chart */}
+            <div style={{ padding: '6px 10px 0', flexShrink: 0 }}>
+              <AITopPicks portfolioId={portfolioId} onSelectSymbol={setSymbol} />
+            </div>
+            <AIActivityTicker socket={socket} onSelectSymbol={setSymbol} />
+
             <div className="ch-body">
-              <Chart symbol={symbol} timeframe={timeframe} socket={socket} overlays={overlays} quote={quote} delta={delta} />
+              <Chart symbol={symbol} timeframe={timeframe} socket={socket} overlays={overlays} quote={quote} delta={delta} portfolioId={portfolioId} onOpenAnalysis={() => setLeftTab('analysis')} />
             </div>
           </>
         )}
@@ -407,6 +417,9 @@ export default function App() {
         sideOpen={railOpen}
         onToggleSide={() => setRailOpen(s => !s)}
       />
+
+      {/* ── Autonomous AI trade toasts (fixed overlay) ── */}
+      <AIToasts socket={socket} />
 
     </div>
   )

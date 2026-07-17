@@ -1097,17 +1097,265 @@ def ai_run(pid):
     return jsonify(summary)
 
 
-@app.route('/api/ai/status')
-def ai_status():
-    """Status of the trader's own model (always local -- no Ollama dependency)."""
+# Per-symbol AI opinion cache + reference thresholds (match the de-risked worker:
+# BUY_THRESH 5.0, shorting disabled in execution — short thresh is informational).
+_opinion_cache: dict = {}
+_OPINION_TTL   = 3.0
+_OPINION_BUY   = 5.0
+_OPINION_SELL  = -1.5
+_OPINION_SHORT = -4.0
+
+
+def _ai_status_payload(pid=None):
+    """Shared shape for the global AI chip — used by both the REST endpoint (initial
+    value) and the ai_status socket event (live)."""
     import trading_model
     st = trading_model.model_status()
+    try:
+        import llm_trader as _llm
+        llm_up = bool(_llm.is_local_ai_up())
+    except Exception:
+        llm_up = False
+    try:
+        universe_size = len(_AI_UNIVERSE)
+    except Exception:
+        universe_size = 0
+    positions_held = ai_pl_today = None
+    if pid:
+        try:
+            import datetime as _dt
+            today = _dt.datetime.utcnow().strftime('%Y-%m-%d') + ' 00:00:00'
+            with _get_db() as conn:
+                positions_held = conn.execute(
+                    'SELECT COUNT(*) FROM sim_positions WHERE portfolio_id=? AND shares!=0', (pid,)).fetchone()[0]
+                ai_pl_today = conn.execute(
+                    "SELECT COALESCE(SUM(realized_pl),0) FROM sim_trades WHERE portfolio_id=? "
+                    "AND status='filled' AND side IN ('sell','cover','arb') AND created_at>=?",
+                    (pid, today)).fetchone()[0]
+        except Exception:
+            pass
+    return {
+        'ai_online': True, 'online': True, 'model': 'trading_model (retrainable)',
+        'model_ready': st['model_ready'], 'real_samples': st['real_samples'],
+        'scanning': bool(globals().get('_AI_SCANNING', False)),
+        'universe_size': universe_size,
+        'next_scan_secs': globals().get('_AI_INTERVAL', 60),
+        'positions_held': positions_held,
+        'ai_pl_today': round(ai_pl_today, 2) if ai_pl_today is not None else None,
+        'llm_up': llm_up, 'message': None,
+    }
+
+
+@app.route('/api/ai/status')
+def ai_status():
+    """Status of the trader's model + live worker state (drives the global AI chip)."""
+    pid = request.args.get('portfolio_id', type=int)
+    return jsonify(_ai_status_payload(pid))
+
+
+@app.route('/api/ai/opinion/<symbol>')
+def ai_opinion(symbol):
+    """The REAL model's opinion on one symbol — the SAME pipeline the autonomous
+    worker uses (indicators → _ai_score_detailed → confidence) plus a suggested order
+    sized exactly like the worker would size it. Single source of truth for the UI."""
+    symbol = (symbol or '').upper()
+    pid = request.args.get('portfolio_id', 1, type=int)
+    now = _time.time()
+    ck  = (symbol, pid)
+    hit = _opinion_cache.get(ck)
+    if hit and now - hit[0] < _OPINION_TTL:
+        return jsonify(hit[1])
+    try:
+        data = _compute_indicators_fast(symbol)
+        data['symbol'] = symbol
+    except Exception as e:
+        return jsonify({'symbol': symbol, 'error': f'no data: {e}', 'score': 0,
+                        'action': 'HOLD', 'confidence': 0, 'reasoning': []}), 200
+    detail = _ai_score_detailed(data)
+    score  = float(detail['score'])
+    ms     = detail.get('market_state', 'neutral')
+    conf   = _compute_confidence(score, data, detail)
+    price  = data.get('last_price') or _get_current_price(symbol)
+    atr    = data.get('atr') or (price * 0.02)
+
+    with _get_db() as conn:
+        held = bool(conn.execute(
+            'SELECT 1 FROM sim_positions WHERE portfolio_id=? AND symbol=? AND shares!=0',
+            (pid, symbol)).fetchone())
+
+    if held:
+        action = 'SELL' if score <= _OPINION_SELL else 'HOLD'
+    else:
+        action = 'BUY' if score >= _OPINION_BUY else 'HOLD'
+
+    # Reproduce the worker's sizing (RISK_PER_TRADE blend + regime stop/target).
+    stop_m, tgt_m = _regime_stop_multiplier(ms)
+    state  = _sim_state(pid)
+    cash   = state.get('cash', 0) or 0
+    equity = cash + sum((p.get('market_value', 0) or 0) for p in _sim_positions_with_prices(pid))
+    score_factor = min(1.0, max(0.0, (abs(score) - _OPINION_BUY) / max(5.0 - _OPINION_BUY, 1)))
+    risk_pct  = 0.010 + score_factor * (0.015 - 0.010)
+    stop_dist  = stop_m * atr
+    raw_shares = (equity * risk_pct / stop_dist) if stop_dist > 0 else 0
+    # Apply the worker's dominant caps so the suggestion matches what it would really buy:
+    # single-position cap (by asset class) and available cash.
+    try:
+        _sc = SINGLE_POS_CAPS.get(_get_asset_class(symbol), 0.05)
+    except Exception:
+        _sc = 0.05
+    pos_value  = min(raw_shares * price, equity * _sc, cash * 0.9) if price else 0
+    raw_shares = (pos_value / price) if price else 0
+    frac = _is_fractional_asset(symbol)
+    shares = round(raw_shares, 4) if frac else max(1, int(raw_shares))
+    payload = {
+        'symbol': symbol, 'score': round(score, 2), 'action': action, 'confidence': conf,
+        'market_state': ms, 'summary': detail.get('summary', ''),
+        'reasoning': detail.get('reasoning', []), 'what_changed': detail.get('what_changed', []),
+        'held': held, 'price': round(price, 4),
+        'suggested': {
+            'shares': shares, 'entry': round(price, 2),
+            'stop':   round(price - stop_m * atr, 2),
+            'target': round(price + tgt_m * atr, 2),
+            'rr':     round(tgt_m / stop_m, 2) if stop_m else 0,
+        },
+        'threshold_buy': _OPINION_BUY, 'threshold_short': _OPINION_SHORT,
+    }
+    _opinion_cache[ck] = (now, payload)
+    return jsonify(payload)
+
+
+@app.route('/api/ai/opinions')
+def ai_opinions():
+    """Batch, LIGHT opinions for many symbols at once (grid/table overlays).
+    Runs the SAME scoring pipeline as /api/ai/opinion but returns only the cheap
+    fields (score, action, confidence, market_state, held) — no suggested sizing —
+    and reuses the shared _opinion_cache TTL so it stays fast. Returns a map
+    { "AAPL": {...}, ... }; symbols that error out are simply omitted."""
+    raw = request.args.get('symbols', '') or ''
+    pid = request.args.get('portfolio_id', 1, type=int)
+    syms = []
+    for s in raw.split(','):
+        s = s.strip().upper()
+        if s and s not in syms:
+            syms.append(s)
+    syms = syms[:40]  # cap the batch
+    now = _time.time()
+    # One query for the held set — avoids a DB round-trip per symbol.
+    try:
+        with _get_db() as conn:
+            held_set = {r['symbol'] for r in conn.execute(
+                'SELECT symbol FROM sim_positions WHERE portfolio_id=? AND shares!=0', (pid,)
+            ).fetchall()}
+    except Exception:
+        held_set = set()
+    out = {}
+    for symbol in syms:
+        try:
+            # Reuse the full-opinion cache when it's warm (read-only — never write a
+            # partial payload back, so /api/ai/opinion keeps its rich fields).
+            hit = _opinion_cache.get((symbol, pid))
+            if hit and now - hit[0] < _OPINION_TTL:
+                p = hit[1]
+                out[symbol] = {
+                    'score': p.get('score', 0), 'action': p.get('action', 'HOLD'),
+                    'confidence': p.get('confidence', 0),
+                    'market_state': p.get('market_state', 'neutral'),
+                    'held': bool(p.get('held')),
+                }
+                continue
+            data = _compute_indicators_fast(symbol)
+            data['symbol'] = symbol
+            detail = _ai_score_detailed(data)
+            score  = float(detail['score'])
+            ms     = detail.get('market_state', 'neutral')
+            conf   = _compute_confidence(score, data, detail)
+            held   = symbol in held_set
+            if held:
+                action = 'SELL' if score <= _OPINION_SELL else 'HOLD'
+            else:
+                action = 'BUY' if score >= _OPINION_BUY else 'HOLD'
+            out[symbol] = {
+                'score': round(score, 2), 'action': action, 'confidence': conf,
+                'market_state': ms, 'held': held,
+            }
+        except Exception:
+            continue  # skip this symbol, keep the rest of the batch
+    return jsonify(out)
+
+
+# Regimes where the worker will not open fresh longs (defensive / bearish).
+_WHY_BEARISH_REGIMES = {'panic', 'trending_down', 'mild_downtrend', 'distribution'}
+
+
+@app.route('/api/ai/why/<symbol>')
+def ai_why(symbol):
+    """Explain, in plain language, why the AI is (or isn't) entering this symbol
+    RIGHT NOW. Runs the SAME scoring pipeline, then re-evaluates the SAME gates the
+    autonomous worker applies and returns every human-readable blocker plus a
+    one-line summary of the primary one."""
+    symbol = (symbol or '').upper()
+    pid = request.args.get('portfolio_id', 1, type=int)
+    try:
+        data = _compute_indicators_fast(symbol)
+        data['symbol'] = symbol
+    except Exception as e:
+        return jsonify({'symbol': symbol, 'action': 'HOLD', 'score': 0, 'confidence': 0,
+                        'blocking': [f'No market data ({e})'],
+                        'reason': 'No market data available for this symbol',
+                        'error': f'no data: {e}'}), 200
+    detail = _ai_score_detailed(data)
+    score  = float(detail['score'])
+    ms     = detail.get('market_state', 'neutral')
+    conf   = _compute_confidence(score, data, detail)
+
+    # ── Portfolio state for gate evaluation (mirrors the worker) ──────────────
+    state   = _sim_state(pid)
+    cash    = state.get('cash', 0) or 0
+    initial = state.get('initial_cash', 100000) or 100000
+    with _get_db() as conn:
+        held = bool(conn.execute(
+            'SELECT 1 FROM sim_positions WHERE portfolio_id=? AND symbol=? AND shares!=0',
+            (pid, symbol)).fetchone())
+        pos_count = conn.execute(
+            'SELECT COUNT(*) FROM sim_positions WHERE portfolio_id=? AND shares!=0', (pid,)
+        ).fetchone()[0]
+    equity   = cash + sum((p.get('market_value', 0) or 0) for p in _sim_positions_with_prices(pid))
+    drawdown = (initial - equity) / initial if initial > 0 else 0.0
+
+    MAX_POS      = 8       # worker concentration cap
+    CASH_RESERVE = 0.40    # worker always keeps 40% cash
+    available    = cash - cash * CASH_RESERVE
+
+    if held:
+        action = 'SELL' if score <= _OPINION_SELL else 'HOLD'
+    else:
+        action = 'BUY' if score >= _OPINION_BUY else 'HOLD'
+
+    # Blockers listed in headline-priority order (blocking[0] drives 'reason').
+    blocking = []
+    if held:
+        blocking.append(f'Already holding {symbol}')
+    if score < _OPINION_BUY:
+        blocking.append(f'Score {score:.1f} is below the +{_OPINION_BUY:.1f} buy threshold')
+    if ms in _WHY_BEARISH_REGIMES:
+        blocking.append(f'Market regime is {ms} — new longs paused')
+    if drawdown > 0.08:
+        blocking.append('Portfolio in drawdown protection')
+    if pos_count >= MAX_POS:
+        blocking.append(f'At max positions ({MAX_POS})')
+    if available < 300:
+        blocking.append('Insufficient free cash')
+
+    if not blocking and score >= _OPINION_BUY:
+        reason = 'Qualifies — the AI would BUY this now'
+    elif blocking:
+        reason = blocking[0]
+    else:
+        reason = 'Score is below the buy threshold — the AI is holding off'
+
     return jsonify({
-        'ai_online': True,
-        'model': 'trading_model (retrainable)',
-        'model_ready': st['model_ready'],
-        'real_samples': st['real_samples'],
-        'message': None,
+        'symbol': symbol, 'action': action, 'score': round(score, 2),
+        'confidence': conf, 'blocking': blocking, 'reason': reason,
     })
 
 
@@ -1664,6 +1912,22 @@ def arbitrage_trade_detail(trade_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/portfolios/<int:pid>/arbitrage/trades', methods=['DELETE'])
+def arbitrage_trades_clear(pid):
+    """Clear a portfolio's arbitrage history to reclaim memory. Each arb_trades row
+    stores full leg-by-leg path JSON, so this table is the biggest space user. The
+    realized profit already credited to cash is NOT reversed (equity is unchanged);
+    the tiny sim_trades mirror is kept so booked P&L stays intact — only the detailed
+    history log is dropped."""
+    try:
+        with _get_db() as conn:
+            n = conn.execute('SELECT COUNT(*) FROM arb_trades WHERE portfolio_id=?', (pid,)).fetchone()[0]
+            conn.execute('DELETE FROM arb_trades WHERE portfolio_id=?', (pid,))
+        return jsonify({'cleared': n})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/portfolios/<int:pid>/arbitrage/toggle', methods=['POST'])
 def arbitrage_toggle(pid):
     """Enable/disable auto-execution of arbitrage for a portfolio."""
@@ -1864,11 +2128,13 @@ def account():
         prow = conn.execute('SELECT ai_controlled, strategy_type FROM portfolios WHERE id=?', (pid,)).fetchone()
         ai_controlled = int(prow['ai_controlled']) if prow else 0
         strategy_type = prow['strategy_type'] if prow and 'strategy_type' in prow.keys() else 'balanced'
+        # Realized today = closed directional trades (sell/cover) PLUS arbitrage
+        # profit ('arb'), which is genuine booked P&L and belongs in the number.
         day_realized = conn.execute(
             '''SELECT COALESCE(SUM(realized_pl), 0) as total
                FROM sim_trades
                WHERE portfolio_id=? AND status='filled'
-               AND side IN ('sell','cover')
+               AND side IN ('sell','cover','arb')
                AND created_at >= ?''',
             (pid, today_start)
         ).fetchone()['total']
@@ -4283,6 +4549,15 @@ def _ai_score(data: dict) -> float:
     return _ai_score_detailed(data)['score']
 
 
+def _emit_ai(event: str, payload: dict):
+    """Fire-and-forget SocketIO emit for AI events. Never blocks or raises into the
+    scan loop — the AI worker's cadence must not depend on any socket client."""
+    try:
+        socketio.emit(event, payload)
+    except Exception:
+        pass
+
+
 def _ai_log_entry(pid: int, symbol: str, action: str, score: float,
                   price: float, shares: float, reason: str, market_state: str = ''):
     with _get_db() as conn:
@@ -4290,6 +4565,17 @@ def _ai_log_entry(pid: int, symbol: str, action: str, score: float,
             'INSERT INTO ai_log (portfolio_id, symbol, action, score, price, shares, reason, market_state) VALUES (?,?,?,?,?,?,?,?)',
             (pid, symbol, action, score, price, shares, reason, market_state or '')
         )
+    # Broadcast the decision live so the whole UI (ticker, toasts, chart markers)
+    # reacts without polling. Every AI open/close flows through here.
+    _act   = (action or '').upper()
+    _phase = 'enter' if _act in ('BUY', 'SHORT') else 'exit' if _act in ('SELL', 'COVER') else 'scan'
+    _side  = {'BUY': 'buy', 'SHORT': 'short', 'SELL': 'sell', 'COVER': 'cover'}.get(_act, _act.lower())
+    _ts    = _time.time()
+    _emit_ai('ai_activity', {'ts': _ts, 'pid': pid, 'symbol': symbol, 'phase': _phase,
+                             'score': round(float(score or 0), 1), 'action': _act, 'text': reason})
+    _emit_ai('ai_trade', {'ts': _ts, 'pid': pid, 'symbol': symbol, 'side': _side,
+                          'shares': shares, 'price': price, 'score': round(float(score or 0), 1),
+                          'reason': reason, 'market_state': market_state or ''})
 
 
 def _log_decision(pid: int, symbol: str, decision: str, score: float = 0,
@@ -4320,46 +4606,50 @@ def _score_to_pct(score: float) -> float:
 
 
 def _compute_confidence(score: float, data: dict, detail: dict) -> int:
-    """Compute 0–100 confidence score combining score strength, MTF alignment,
-    volume confirmation, uncertainty, and regime clarity."""
-    uncertainty = float(detail.get('uncertainty', 0.3) or 0.3)
-    mtf         = detail.get('mtf_bias', {}) or {}
-    vol_r       = float(data.get('volume_ratio', 1) or 1)
-    regime      = detail.get('market_state', 'neutral') or 'neutral'
+    """0–100 conviction in a call. Calibrated to be MEANINGFUL: it keys off how strong
+    the signal is (|score|), whether the model's own drivers AGREE with each other,
+    regime clarity, and volume — so a strong, agreed, in-trend read lands high (80-90)
+    while a weak/near-flat or conflicted read stays honestly low (10-30).
 
-    # Base: score magnitude → 0–60 pts
-    base = min(60, int(abs(score) / 10 * 60))
+    (The old formula leaned on `uncertainty` and `mtf_bias`, but the live scoring path
+    hardcodes those to 0.0/'' — they were dead inputs, which is why a near-zero score
+    could still show ~50%. This version uses the actual per-signal contributions.)"""
+    reasons = detail.get('reasoning', []) or []
+    regime  = detail.get('market_state', 'neutral') or 'neutral'
+    vol_r   = float(data.get('volume_ratio', 1) or 1)
+    a       = abs(float(score or 0))
 
-    # MTF alignment bonus: 0–20 pts
-    alignment = float(mtf.get('alignment', 0.33) or 0.33)
-    bias       = mtf.get('bias', 'neutral') or 'neutral'
-    score_dir  = 1 if score > 0 else -1 if score < 0 else 0
-    bias_dir   = 1 if bias == 'bullish' else -1 if bias == 'bearish' else 0
-    if score_dir != 0 and bias_dir == score_dir:
-        mtf_bonus = int(alignment * 20)   # up to +20
-    elif bias_dir != 0 and bias_dir != score_dir:
-        mtf_bonus = -int(alignment * 15)  # opposing MTF: up to -15
+    # Conviction from magnitude — saturating ramp (k=2.0): |score| 1->~39, 2->~52,
+    # 5->~69, 8->~76. Near-zero scores start low.
+    conviction = 12.0 + 80.0 * a / (a + 2.0)
+
+    # Signal agreement: do the model's contributing signals point the SAME way as the
+    # net score, or fight each other? Consensus raises conviction; conflict lowers it.
+    if reasons and a > 0.2:
+        sdir    = 1 if score > 0 else -1
+        agree   = sum(1 for r in reasons if (r.get('contribution', 0) or 0) * sdir > 0)
+        against = sum(1 for r in reasons
+                      if (r.get('contribution', 0) or 0) * sdir < 0 and abs(r.get('contribution', 0) or 0) > 0.1)
+        tot = agree + against
+        agreement_adj = ((agree - against) / tot) * 15.0 if tot else 0.0   # ±15
     else:
-        mtf_bonus = 0
+        agreement_adj = -12.0   # no clear drivers / near-flat score → uncertain
 
-    # Volume confirmation bonus: 0–10 pts
+    # Regime clarity
+    regime_adj = 8.0  if regime in ('trending_up', 'trending_down', 'breakout') else \
+                -12.0 if regime in ('neutral', 'ranging') else \
+                 -6.0 if regime in ('high_volatility', 'panic') else 0.0
+
+    # Volume confirmation
     vol_sig = data.get('volume_signal', '') or ''
-    if vol_sig in ('high_up', 'high_down') and vol_r >= 1.5:
-        vol_bonus = min(10, int((vol_r - 1) * 6))
+    if vol_sig in ('high_up', 'high_down') and vol_r >= 1.4:
+        vol_adj = min(8.0, (vol_r - 1) * 6.0)
     elif vol_sig == 'low':
-        vol_bonus = -10
+        vol_adj = -8.0
     else:
-        vol_bonus = 0
+        vol_adj = 0.0
 
-    # Uncertainty penalty: 0–25 pts subtracted
-    uncertainty_penalty = int(uncertainty * 25)
-
-    # Regime clarity bonus: clear regime → +5, neutral/ranging → -5
-    regime_bonus = 5 if regime in ('trending_up', 'trending_down', 'breakout', 'panic') else \
-                  -5 if regime in ('neutral', 'ranging') else 0
-
-    confidence = base + mtf_bonus + vol_bonus - uncertainty_penalty + regime_bonus
-    return max(5, min(95, confidence))
+    return max(5, min(95, int(round(conviction + agreement_adj + regime_adj + vol_adj))))
 
 
 def _compute_trade_quality(c: dict, history_ctx: dict, portfolio_reg: dict,
@@ -5186,15 +5476,15 @@ def _ai_run_portfolio(pid: int) -> dict:
     trades, returning a clear skip_reason instead.
     """
     _scan_ctx.pid = pid   # current portfolio for the in-flight scan
-    MAX_POS      = 10   # max 10 positions — concentrate on quality
-    CASH_RESERVE = 0.35    # keep 35% cash always — no more 50% in one trade
-    ATR_STOP_M   = 0.8    # tighter stops — was 1.5, letting losers bleed too long
-    ATR_TGT_M    = 2.0
-    BATCH_SIZE   = 30   # raised from 25 — scan more symbols per cycle
-    BUY_THRESH   = 3.5     # raised: overnight longs lost while shorts won — need higher long conviction
-    SELL_THRESH  = -1.8    # exit sooner when signals turn bearish
-    SHORT_THRESH = -2.5    # lowered: shorts working — allow more short entries
-    COVER_THRESH = 1.0     # close short when signal turns neutral/bullish
+    MAX_POS      = 8    # concentrate on fewer, higher-conviction names
+    CASH_RESERVE = 0.40    # keep 40% cash always (arbitrage needs free cash to deploy)
+    ATR_STOP_M   = 1.0    # give trades room; premature 0.8-ATR stops whipsawed out on fees
+    ATR_TGT_M    = 3.0    # let winners run to 3×ATR — stop cutting them short
+    BATCH_SIZE   = 30
+    BUY_THRESH   = 5.0     # MUCH more selective — only strong-conviction longs clear the bar
+    SELL_THRESH  = -1.5    # exit when signals genuinely turn
+    SHORT_THRESH = -99.0   # shorting DISABLED — 50%-margin shorts on a low-edge model = ruin
+    COVER_THRESH = 0.5     # (still covers any legacy short quickly)
 
     history_ctx = _build_history_context(pid)
     BUY_THRESH  = BUY_THRESH  + history_ctx['buy_thresh_adj']
@@ -5383,22 +5673,53 @@ def _ai_run_portfolio(pid: int) -> dict:
         # Portfolio regime — computed once after equity is known
         port_regime = _portfolio_regime(pid, equity)
 
-        # ── Portfolio P&L awareness + emergency unrealized loss gate ──────────
+        # ── Portfolio P&L awareness + drawdown brakes ─────────────────────────
         state_initial = _sim_state(pid).get('initial_cash', 100000)
         portfolio_loss_pct = (state_initial - equity) / state_initial if state_initial > 0 else 0
-        if portfolio_loss_pct > 0.05:
+
+        HARD_STOP_DD = 0.08   # hard stop-out: flatten everything, halt directional trading
+        if portfolio_loss_pct > HARD_STOP_DD:
+            # Liquidate every open directional position ONCE, then take no new
+            # directional risk until equity recovers. The arbitrage worker keeps
+            # running independently to earn the account back. This is the circuit
+            # breaker that turns "-$800 in an hour" into a bounded, capped loss.
+            try:
+                with _get_db() as conn:
+                    _open = conn.execute(
+                        'SELECT symbol, shares FROM sim_positions WHERE portfolio_id=? AND shares!=0', (pid,)
+                    ).fetchall()
+                for _p in _open:
+                    _sym, _sh = _p['symbol'], _p['shares']
+                    try:
+                        _px   = _get_current_price(_sym)
+                        _atrv = (_px or 1) * 0.02
+                        if _sh > 0:
+                            _sim_sell(_sym, _sh, _apply_slippage(_px, 'sell', _atrv, 1.0, _sh), pid)
+                        else:
+                            _sim_cover(_sym, abs(_sh), _apply_slippage(_px, 'buy', _atrv, 1.0, abs(_sh)), pid)
+                        summary['sold'].append({'symbol': _sym, 'reason': 'hard_stop_liquidation'})
+                    except Exception as _e:
+                        summary['errors'].append(f'hard_stop {_sym}: {_e}')
+            except Exception:
+                pass
+            BUY_THRESH   = 99.0
+            SHORT_THRESH = -999.0
+            summary['skip_reason'] = ('HARD_STOP %.1f%% drawdown — flattened, directional halted (arb continues)'
+                                      % (portfolio_loss_pct * 100))
+        elif portfolio_loss_pct > 0.05:
             BUY_THRESH = 99.0
             summary['skip_reason'] = summary.get('skip_reason') or 'portfolio_loss_protection'
         elif portfolio_loss_pct > 0.03:
-            BUY_THRESH = max(BUY_THRESH, 5.0)
+            BUY_THRESH = max(BUY_THRESH, 7.0)
 
-        # Emergency: if open unrealized losses > 1.5% of equity, tighten all stops to near-current price
+        # Softer emergency: only on a genuine open-loss spike, and don't over-tighten
+        # into a whipsaw (the old 0.3-ATR panic churned recoverable positions out).
         try:
             unreal = sum(p.get('unrealized_pl', 0) or 0 for p in _sim_positions_with_prices(pid))
             unreal_pct = abs(unreal) / equity if equity > 0 and unreal < 0 else 0
-            if unreal_pct > 0.015:  # losing more than 1.5% on open positions
-                ATR_STOP_M = 0.3   # emergency tighten — get out faster
-                BUY_THRESH = 99.0  # no new entries while bleeding
+            if unreal_pct > 0.025:  # losing more than 2.5% on open positions
+                ATR_STOP_M = 0.6
+                BUY_THRESH = 99.0
         except Exception:
             pass
 
@@ -5795,7 +6116,12 @@ def _ai_run_portfolio(pid: int) -> dict:
                 continue
 
             alloc = min(position_value, available)
-            if alloc < 10:
+            # Minimum trade size so fixed costs (the $1/order min commission + slippage)
+            # stay a small fraction of the position. Below this, the trade can't clear
+            # its own round-trip fees — skip it (small accounts lean on arbitrage instead).
+            MIN_TRADE_NOTIONAL = max(300.0, equity * 0.01)
+            if alloc < MIN_TRADE_NOTIONAL:
+                summary['skipped'].append(f"{c['symbol']}: below min trade ${MIN_TRADE_NOTIONAL:.0f}")
                 continue
             raw_shares = alloc / c['price']
             shares = raw_shares if _is_fractional_asset(c['symbol']) else max(1, int(raw_shares))
@@ -5910,10 +6236,12 @@ def _ai_run_portfolio(pid: int) -> dict:
 
 
 # ── AI background worker ───────────────────────────────────────────────────────
-_AI_INTERVAL = 30   # seconds between scans
+_AI_INTERVAL = 60   # seconds between scans — slower cadence = far less fee-bleeding churn
+_AI_SCANNING = False   # live flag surfaced in ai_status (drives the "scanning" chip state)
 
 def _ai_worker():
     """Daemon thread: scan all AI portfolios every _AI_INTERVAL seconds."""
+    global _AI_SCANNING
     _time.sleep(10)   # let app finish startup
     while True:
         try:
@@ -5921,8 +6249,10 @@ def _ai_worker():
                 rows = conn.execute(
                     'SELECT id FROM portfolios WHERE ai_controlled=1'
                 ).fetchall()
+            _AI_SCANNING = True
             for row in rows:
                 try:
+                    _emit_ai('ai_status', _ai_status_payload(row['id']))   # scanning=True
                     result = _ai_run_portfolio(row['id'])
                     if result['bought'] or result['sold'] or result['errors']:
                         print(f'[AI] pid={row["id"]} scanned={result["scanned"]} '
@@ -5931,9 +6261,20 @@ def _ai_worker():
                               f'errors={result["errors"][:3]}')
                     else:
                         print(f'[AI] pid={row["id"]} scanned={result["scanned"]} — no trades')
+                    # Per-cycle activity summary line for the ticker (not per-symbol spam)
+                    _emit_ai('ai_activity', {
+                        'ts': _time.time(), 'pid': row['id'], 'symbol': '', 'phase': 'scan',
+                        'score': 0, 'action': 'SCAN',
+                        'text': f"Scanned {result['scanned']} symbols · "
+                                f"{len(result['bought'])} buys, {len(result['sold'])} exits"})
                 except Exception as e:
                     print(f'[AI] portfolio {row["id"]} error: {e}')
+            _AI_SCANNING = False
+            # Idle status tick (scanning=False) so the chip + countdown update between scans
+            for row in rows:
+                _emit_ai('ai_status', _ai_status_payload(row['id']))
         except Exception as e:
+            _AI_SCANNING = False
             print(f'[AI] worker error: {e}')
         _time.sleep(_AI_INTERVAL)
 
@@ -5942,7 +6283,7 @@ threading.Thread(target=_ai_worker, daemon=True, name='ai-trader').start()
 
 # ── Arbitrage worker ──────────────────────────────────────────────────────────
 
-_ARB_INTERVAL = 35   # seconds between arbitrage scans (only runs when arb enabled)
+_ARB_INTERVAL = 12   # seconds between arbitrage scans — arb spreads are fleeting, scan often
 
 
 def _rescale_arb(opp: dict, notional: float) -> dict:
@@ -5971,7 +6312,7 @@ def _arb_worker():
     try:
         import arbitrage_engine as _arb
         if _arb.get_engine() is None:
-            _arb.init_engine()
+            _arb.init_engine(min_profit_usd=0.01, default_notional=25000.0)
         print('[TradeSimulator] ArbitrageEngine initialized (Coinbase + Kraken feeds).')
     except Exception as e:
         print(f'[TradeSimulator] ArbitrageEngine init failed: {e}')
@@ -5982,9 +6323,11 @@ def _arb_worker():
             # Only touch the exchanges when at least one portfolio has arb enabled.
             # This keeps Coinbase/Kraken load (and any rate-limiting that would slow
             # the inline /orderbook handler) at exactly zero whenever arb is off.
+            # Every AI-controlled portfolio arbitrages heavily by default (the safe,
+            # net-positive engine), plus anyone who flips the arb toggle explicitly.
             with _get_db() as conn:
                 rows = conn.execute(
-                    'SELECT id FROM portfolios WHERE arb_enabled=1'
+                    'SELECT id FROM portfolios WHERE arb_enabled=1 OR ai_controlled=1'
                 ).fetchall()
             if not rows:
                 _time.sleep(_ARB_INTERVAL)
@@ -6008,10 +6351,10 @@ def _arb_worker():
                     try:
                         state = _sim_state(pid)
                         cash  = state.get('cash', 0) or 0
-                        notional = min(eng.default_notional, max(0, cash * 0.5))
+                        notional = min(eng.default_notional, max(0, cash * 0.6))
                         if notional < 100:
                             continue
-                        for base_opp in executable[:3]:   # cap executions per cycle
+                        for base_opp in executable[:8]:   # cap executions per cycle
                             opp = _rescale_arb(base_opp, notional)
                             if opp['profit'] <= 0:
                                 continue

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import api from '../api.js'
+import AIScoreBadge from './AIScoreBadge.jsx'
 
 const isCrypto  = sym => sym.endsWith('-USD')
 const isForex   = sym => sym.endsWith('=X')
@@ -106,7 +107,7 @@ function fmtQty(n) {
   return v.toFixed(8)
 }
 
-function PositionCard({ p, isReal, totalValue, onClose, protData }) {
+function PositionCard({ p, isReal, totalValue, onClose, protData, aiInfo }) {
   const isShort = p.side === 'short'
   const absQty  = Math.abs(p.qty)
   const mktVal  = absQty * p.current_price
@@ -120,6 +121,7 @@ function PositionCard({ p, isReal, totalValue, onClose, protData }) {
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, color: isShort ? '#ff6a6a' : 'var(--t-1)', flexShrink: 0 }}>
           {p.symbol}
         </span>
+        <AIScoreBadge score={aiInfo?.score} action={aiInfo?.action} />
         {isShort && (
           <span style={{ fontSize: 7, fontWeight: 700, color: '#ff476f', border: '1px solid rgba(255,71,111,0.4)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.4, letterSpacing: '0.04em', flexShrink: 0 }}>
             SHORT
@@ -154,7 +156,7 @@ function PositionCard({ p, isReal, totalValue, onClose, protData }) {
   )
 }
 
-function SideGroup({ label, color, positions, isReal, totalValue, protection, onClose }) {
+function SideGroup({ label, color, positions, isReal, totalValue, protection, onClose, aiMap }) {
   if (!positions.length) return null
   return (
     <div style={{ marginBottom: 6 }}>
@@ -167,6 +169,7 @@ function SideGroup({ label, color, positions, isReal, totalValue, protection, on
           p={p} isReal={isReal} totalValue={totalValue}
           onClose={() => onClose(p.symbol, p.qty, p.side)}
           protData={protection[p.symbol]}
+          aiInfo={aiMap[p.symbol]}
         />
       ))}
     </div>
@@ -177,6 +180,24 @@ export default function Positions({ positions, onRefresh, portfolioId, totalValu
   const isReal = portfolioId === 0
   const [protection, setProtection] = useState({})
   const [activeTab, setActiveTab]   = useState('all')
+  const [aiMap, setAiMap]           = useState({})   // symbol -> { score, action, confidence }
+
+  // Batch-fetch AI opinions for held symbols (refresh ~20s).
+  // Endpoint may not exist yet -> .catch leaves badges hidden, never crashes.
+  const symbolsKey = positions.map(p => p.symbol).join(',')
+  useEffect(() => {
+    if (!symbolsKey) { setAiMap({}); return }
+    let cancelled = false
+    const syms = Array.from(new Set(positions.map(p => p.symbol)))
+    const fetchOpinions = () => {
+      api.get('/ai/opinions', { params: { symbols: syms.join(','), portfolio_id: portfolioId || 1 } })
+        .then(r => { if (!cancelled) setAiMap(r.data || {}) })
+        .catch(() => {})
+    }
+    fetchOpinions()
+    const id = setInterval(fetchOpinions, 20000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [symbolsKey, portfolioId])
 
   useEffect(() => {
     if (!portfolioId || portfolioId === 0) return
@@ -261,8 +282,8 @@ export default function Positions({ positions, onRefresh, portfolioId, totalValu
                 ? <div style={{ color: 'var(--t-4)', fontSize: 11, textAlign: 'center', padding: '16px 0' }}>No {activeTab} positions</div>
                 : (
                   <>
-                    <SideGroup label="Long" color="#4ad9ff" positions={longs} isReal={isReal} totalValue={totalValue} protection={protection} onClose={closePosition} />
-                    <SideGroup label="Short" color="#ff6a6a" positions={shorts} isReal={isReal} totalValue={totalValue} protection={protection} onClose={closePosition} />
+                    <SideGroup label="Long" color="#4ad9ff" positions={longs} isReal={isReal} totalValue={totalValue} protection={protection} onClose={closePosition} aiMap={aiMap} />
+                    <SideGroup label="Short" color="#ff6a6a" positions={shorts} isReal={isReal} totalValue={totalValue} protection={protection} onClose={closePosition} aiMap={aiMap} />
                   </>
                 )
               }

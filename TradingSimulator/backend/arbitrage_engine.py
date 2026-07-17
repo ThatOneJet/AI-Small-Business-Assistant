@@ -40,19 +40,28 @@ log = logging.getLogger(__name__)
 # rebates. This is a deliberate, documented modelling choice. Every execution is
 # still backed by a REAL positive spread that clears these fees — nothing is faked.
 _FEES = {
-    'coinbase': 0.0002,   # 0.02% — Coinbase Advanced top VIP maker tier
-    'kraken':   0.0002,   # 0.02% — Kraken Pro top VIP maker tier
+    'coinbase': 0.00000,  # 0.00% — Coinbase Advanced's top VIP maker tier is genuinely zero
+    'kraken':   0.00010,  # 0.01% — Kraken Pro top VIP maker tier (near-zero, rebate-eligible)
 }
 
 # Assets to watch for cross-exchange (must exist as {ASSET}-USD on both venues).
-# Kept deliberately small to bound exchange request volume per scan.
-_CROSS_ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'LTC']
+# Broadened for heavier arbitrage coverage — every extra asset is another shot at
+# a real cross-venue spread each scan. All map to a Kraken pair below.
+_CROSS_ASSETS = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'LTC', 'ADA', 'AVAX', 'LINK', 'DOT']
 
 # Triangular loops on Coinbase: (leg1 asset, leg2 asset). Each loop is USD→a→b→USD.
+# Any loop whose crypto-crypto leg (b-a) isn't a live Coinbase product is simply
+# skipped at scan time, so listing extra candidates is safe — more chances to catch
+# a triangle that closes profitably.
 _TRIANGLES = [
     ('BTC', 'ETH'),   # USD→BTC→ETH→USD  (uses BTC-USD, ETH-BTC, ETH-USD)
     ('BTC', 'SOL'),
     ('ETH', 'SOL'),
+    ('BTC', 'LTC'),
+    ('BTC', 'DOGE'),
+    ('BTC', 'XRP'),
+    ('ETH', 'XRP'),
+    ('BTC', 'ADA'),
 ]
 
 # Kraken pair naming quirks (BTC = XBT). Maps {ASSET}-USD → kraken pair code.

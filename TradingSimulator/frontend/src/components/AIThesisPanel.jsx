@@ -1,93 +1,117 @@
-import { useMemo } from 'react'
-import { computeDecision } from '../utils/tradeDecision'
+import { useState, useEffect, useMemo } from 'react'
+import api from '../api.js'
 
-const REGIME_DISPLAY = {
-  'trending_up':     { label: 'Trending Up',     icon: '↗', color: '#3ddc97' },
-  'trending_down':   { label: 'Trending Down',   icon: '↘', color: '#ff476f' },
-  'consolidating':   { label: 'Consolidating',   icon: '↔', color: '#f5b342' },
-  'high_volatility': { label: 'High Volatility', icon: '⚡', color: '#ff9a3c' },
-  'neutral':         { label: 'Neutral',          icon: '→', color: '#6b7689' },
+// Named market regimes the backend can return (market_state field) → chip label + color.
+const STATE_META = {
+  trending_up:        { label: 'Trending Up',        color: '#3ddc97' },
+  trending_down:      { label: 'Trending Down',      color: '#ff476f' },
+  breakout:           { label: 'Breakout',           color: '#3ddc97' },
+  accumulation:       { label: 'Accumulation',       color: '#5fd39a' },
+  oversold_extreme:   { label: 'Oversold Extreme',   color: '#5fd39a' },
+  overbought_extreme: { label: 'Overbought Extreme', color: '#ff476f' },
+  euphoric:           { label: 'Euphoric',           color: '#ff9a3c' },
+  panic:              { label: 'Panic',              color: '#ff476f' },
+  high_volatility:    { label: 'High Volatility',    color: '#ff9a3c' },
+  ranging:            { label: 'Ranging',            color: '#f5b342' },
+  consolidating:      { label: 'Consolidating',      color: '#f5b342' },
+  neutral:            { label: 'Neutral',            color: '#6b7689' },
 }
 
-function buildExplanation(decision, data, price) {
-  const { action, score, bulls, bears } = decision
-  const parts = []
-
-  // Why section
-  if (action === 'HOLD') {
-    parts.push('Mixed signals — no clear directional edge at current levels.')
-  } else if (action === 'BUY') {
-    if (data?.rsi != null && data.rsi <= 35)
-      parts.push(`RSI at ${data.rsi.toFixed(1)} is oversold — buyers historically step in here.`)
-    if (data?.stoch_k_val != null && data.stoch_k_val <= 25)
-      parts.push(`Stochastic %K at ${data.stoch_k_val.toFixed(1)} is deep oversold, increasing snap-back probability.`)
-    if (data?.bb_position === 'oversold' || data?.bb_position === 'lower_half')
-      parts.push('Price near the lower Bollinger Band — statistical mean reversion setup.')
-    if (data?.macd_cross === 'bullish_cross')
-      parts.push('MACD bullish crossover signals a fresh momentum shift.')
-    else if (data?.macd_cross === 'bullish')
-      parts.push('MACD is trending bullish above its signal line.')
-    if (data?.volume_signal === 'high_up')
-      parts.push('Above-average volume on an up day confirms institutional accumulation.')
-    if (data?.trend === 'up')
-      parts.push('Broader regression slope is positive — trading with the trend.')
-  } else {
-    if (data?.rsi != null && data.rsi >= 65)
-      parts.push(`RSI at ${data.rsi.toFixed(1)} is overbought — exhaustion risk is rising.`)
-    if (data?.macd_cross === 'bearish_cross')
-      parts.push('MACD bearish crossover signals loss of upside momentum.')
-    if (data?.bb_position === 'overbought' || data?.bb_position === 'upper_half')
-      parts.push('Price at the upper Bollinger Band — a distribution zone.')
-    if (data?.volume_signal === 'high_down')
-      parts.push('High volume on a down move signals active institutional selling.')
+function stateMeta(ms) {
+  if (!ms) return null
+  return STATE_META[ms] || {
+    label: String(ms).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+    color: '#6b7689',
   }
+}
 
-  if (parts.length === 0)
-    parts.push(`Score of ${score > 0 ? '+' : ''}${score.toFixed(1)} with ${bulls?.length || 0} bullish and ${bears?.length || 0} bearish signals.`)
+// Color-grade the numeric AI score (scale −10..+10, positive = bullish).
+function gradeColor(score) {
+  if (score >= 6)  return '#3ddc97'
+  if (score >= 3)  return '#5fd39a'
+  if (score >= 1)  return 'var(--t-3)'
+  if (score > -1)  return 'var(--t-4)'
+  if (score > -3)  return '#ff8fa3'
+  return '#ff476f'
+}
 
-  // Invalidation woven in at the end
-  const inv = []
-  if (action === 'BUY') {
-    if (data?.atr && price) inv.push(`a close below $${(price - 2 * data.atr).toFixed(2)} (2× ATR stop)`)
-    if (data?.macd_cross === 'bullish' || data?.macd_cross === 'bullish_cross')
-      inv.push('a MACD bearish crossover')
-    if (data?.vwap_signal === 'above' && data?.vwap_value)
-      inv.push(`failure to hold VWAP ($${Number(data.vwap_value).toFixed(2)})`)
-  } else if (action === 'SELL') {
-    if (data?.atr && price) inv.push(`a recovery above $${(price + 2 * data.atr).toFixed(2)} (2× ATR)`)
-    inv.push('a MACD bullish crossover')
-  } else {
-    inv.push('score reaching ≥ +2.0 or ≤ −2.0')
-    inv.push('a significant volume expansion in either direction')
-  }
+function actionColors(action) {
+  if (action === 'BUY')  return { fg: '#3ddc97', bg: 'rgba(61,220,151,0.12)' }
+  if (action === 'SELL') return { fg: '#ff476f', bg: 'rgba(255,71,111,0.12)' }
+  return { fg: '#f5b342', bg: 'rgba(245,179,66,0.12)' }
+}
 
-  if (inv.length > 0)
-    parts.push(`Exit the trade on: ${inv.join(', ')}.`)
+// Fallback action derivation (only used when the backend didn't hand us one).
+function deriveAction(score) {
+  if (score >= 5)  return 'BUY'
+  if (score <= -4) return 'SELL'
+  return 'HOLD'
+}
 
-  return parts.join(' ')
+function fmtVal(v) {
+  if (v == null || v === '') return '—'
+  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(2)
+  return String(v)
 }
 
 export default function AIThesisPanel({ data, price, symbol }) {
-  const decision = useMemo(() => {
-    if (!data || !price) return null
-    try { return computeDecision(data, price) } catch { return null }
-  }, [data, price])
+  const [opinion, setOpinion] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [failed,  setFailed]  = useState(false)
 
-  if (!decision) return (
+  // Fetch the REAL backend model's opinion — the same pipeline the autonomous AI uses.
+  useEffect(() => {
+    if (!symbol) { setOpinion(null); setFailed(false); setLoading(false); return }
+    let cancelled = false
+    setLoading(true); setFailed(false); setOpinion(null)
+    api.get(`/ai/opinion/${symbol}`, {
+      params: { portfolio_id: localStorage.getItem('portfolioId') || '2' },
+    })
+      .then(r => {
+        if (cancelled) return
+        if (r.data && !r.data.error) setOpinion(r.data)
+        else setFailed(true)
+        setLoading(false)
+      })
+      .catch(() => { if (!cancelled) { setFailed(true); setLoading(false) } })
+    return () => { cancelled = true }
+  }, [symbol])
+
+  // Degraded fallback built from the analysis data prop — used ONLY if the fetch fails.
+  const fallback = useMemo(() => {
+    if (!data) return null
+    const score = Number(data.score ?? 0)
+    return {
+      score,
+      action:       deriveAction(score),
+      confidence:   data.strategy?.confidence ?? data.confidence ?? null,
+      market_state: data.market_state || data.regime || 'neutral',
+      summary:      data.summary || '',
+      reasoning:    Array.isArray(data.reasoning) ? data.reasoning : [],
+    }
+  }, [data])
+
+  const view = opinion || (failed ? fallback : null)
+
+  if (!view) return (
     <div style={{ padding: '24px', textAlign: 'center', color: '#6b7689', fontSize: '13px' }}>
-      Load a symbol to see AI analysis
+      {loading && symbol ? `Analyzing ${symbol}…` : 'Load a symbol to see AI analysis'}
     </div>
   )
 
-  const { action, score, confidence } = decision
-  const actionColor = action === 'BUY' ? '#3ddc97' : action === 'SELL' ? '#ff476f' : '#f5b342'
-  const actionBg    = action === 'BUY' ? 'rgba(61,220,151,0.12)' : action === 'SELL' ? 'rgba(255,71,111,0.12)' : 'rgba(245,179,66,0.12)'
-  const explanation = buildExplanation(decision, data, price)
-  const regime      = data?.regime ? (REGIME_DISPLAY[data.regime] || REGIME_DISPLAY.neutral) : null
+  const score   = Number(view.score ?? 0)
+  const action  = view.action || deriveAction(score)
+  const conf    = view.confidence
+  const ac      = actionColors(action)
+  const scoreCol = gradeColor(score)
+  const state   = stateMeta(view.market_state)
+
+  const reasons = Array.isArray(view.reasoning) ? view.reasoning.slice(0, 6) : []
+  const maxContrib = reasons.reduce((m, r) => Math.max(m, Math.abs(Number(r.contribution) || 0)), 0) || 1
 
   return (
     <div style={{ fontFamily: 'var(--font-sans)', fontSize: '13px' }}>
-      {/* Header */}
+      {/* Header — real action, score, confidence + market regime */}
       <div style={{
         padding: '12px 14px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -97,34 +121,82 @@ export default function AIThesisPanel({ data, price, symbol }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <span style={{
             padding: '3px 12px', borderRadius: '5px', fontSize: '13px', fontWeight: 700,
-            background: actionBg, color: actionColor, border: `1px solid ${actionColor}`,
+            background: ac.bg, color: ac.fg, border: `1px solid ${ac.fg}`,
             fontFamily: 'var(--font-mono)',
           }}>{action}</span>
-          <span style={{ fontSize: '12px', color: '#e6ecf5', fontFamily: 'var(--font-mono)' }}>
-            {score > 0 ? '+' : ''}{score.toFixed(1)}&nbsp;·&nbsp;{confidence}%
+          <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)' }}>
+            <span style={{ color: scoreCol, fontWeight: 700 }}>
+              {score > 0 ? '+' : ''}{score.toFixed(1)}
+            </span>
+            {conf != null && (
+              <span style={{ color: '#8b95a7' }}>&nbsp;·&nbsp;{Math.round(conf)}%</span>
+            )}
           </span>
         </div>
-        {regime && (
-          <span style={{ fontSize: '11px', color: regime.color, display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <span>{regime.icon}</span><span>{regime.label}</span>
-          </span>
+        {state && (
+          <span style={{ fontSize: '11px', color: state.color }}>{state.label}</span>
         )}
       </div>
 
-      {/* Explanation + invalidation combined */}
       <div style={{ padding: '14px' }}>
-        <div style={{ fontSize: '9px', letterSpacing: '0.08em', color: '#6b7689', textTransform: 'uppercase', marginBottom: '8px' }}>
-          AI Explanation
-        </div>
-        <p style={{
-          margin: 0, color: '#aab4c5', lineHeight: '1.7', fontSize: '12px',
-          padding: '10px 12px',
-          background: `${actionColor}08`,
-          borderLeft: `2px solid ${actionColor}44`,
-          borderRadius: '0 6px 6px 0',
-        }}>
-          {explanation}
-        </p>
+        {/* Backend summary */}
+        {view.summary && (
+          <>
+            <div style={{ fontSize: '9px', letterSpacing: '0.08em', color: '#6b7689', textTransform: 'uppercase', marginBottom: '8px' }}>
+              AI Summary
+            </div>
+            <p style={{
+              margin: 0, color: '#aab4c5', lineHeight: '1.7', fontSize: '12px',
+              padding: '10px 12px',
+              background: `${ac.fg}08`,
+              borderLeft: `2px solid ${ac.fg}44`,
+              borderRadius: '0 6px 6px 0',
+            }}>
+              {view.summary}
+            </p>
+          </>
+        )}
+
+        {/* Ranked signal drivers — width ∝ |contribution|, colored by direction */}
+        {reasons.length > 0 && (
+          <div style={{ marginTop: view.summary ? '16px' : 0 }}>
+            <div style={{ fontSize: '9px', letterSpacing: '0.08em', color: '#6b7689', textTransform: 'uppercase', marginBottom: '10px' }}>
+              Signal Drivers
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '9px' }}>
+              {reasons.map((r, i) => {
+                const contrib = Number(r.contribution) || 0
+                const bull    = r.direction === 'bullish' || contrib > 0
+                const barCol  = bull ? '#3ddc97' : '#ff476f'
+                const pct     = Math.max(4, (Math.abs(contrib) / maxContrib) * 100)
+                return (
+                  <div key={`${r.signal}-${i}`}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '11.5px', color: '#c5cdda' }}>
+                        {r.signal}
+                        <span style={{ color: '#6b7689', fontFamily: 'var(--font-mono)', marginLeft: '6px', fontSize: '10.5px' }}>
+                          {fmtVal(r.value)}
+                        </span>
+                      </span>
+                      <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 700, color: barCol }}>
+                        {contrib > 0 ? '+' : ''}{contrib.toFixed(1)}
+                      </span>
+                    </div>
+                    <div style={{ height: '5px', borderRadius: '3px', background: 'rgba(140,170,220,0.08)', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, background: barCol, opacity: 0.85, borderRadius: '3px', transition: 'width 0.4s' }} />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {!view.summary && reasons.length === 0 && (
+          <p style={{ margin: 0, color: '#6b7689', fontSize: '12px' }}>
+            No strong signals from the model right now.
+          </p>
+        )}
       </div>
     </div>
   )

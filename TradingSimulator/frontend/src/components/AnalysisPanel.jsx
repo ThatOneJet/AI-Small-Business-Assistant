@@ -814,7 +814,143 @@ function ContextBar({ brief, price, portReg }) {
   )
 }
 
-function AnalysisTab({ data, price, symbol, brief, portReg }) {
+// ── AI Setup Actions — one-click "use the AI's suggested setup" + "why not?" ──
+
+function AISetupActions({ symbol, portfolioId }) {
+  const pid = portfolioId || localStorage.getItem('portfolioId') || '2'
+  const [op,         setOp]         = useState(null)
+  const [why,        setWhy]        = useState(null)
+  const [whyLoading, setWhyLoading] = useState(false)
+  const [placing,    setPlacing]    = useState(false)
+  const [msg,        setMsg]        = useState(null) // { text, color }
+
+  useEffect(() => {
+    if (!symbol) { setOp(null); return }
+    let alive = true
+    setOp(null); setWhy(null); setMsg(null)
+    api.get('/ai/opinion/' + symbol, { params: { portfolio_id: pid } })
+      .then(r => { if (alive) setOp(r.data) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [symbol, pid])
+
+  const action    = op?.action || 'HOLD'
+  const suggested = op?.suggested || {}
+  const isSetup   = action === 'BUY' || action === 'SELL'
+  const acColor   = action === 'BUY' ? '#3ddc97' : action === 'SELL' ? '#ff476f' : '#f5b342'
+
+  async function useSetup() {
+    if (!isSetup || placing) return
+    setPlacing(true); setMsg(null)
+    try {
+      // Re-fetch a fresh opinion so we never trade on stale numbers
+      const r = await api.get('/ai/opinion/' + symbol, { params: { portfolio_id: pid } })
+      const o = r.data
+      setOp(o)
+      const act = o?.action
+      const sh  = o?.suggested?.shares
+      if (act !== 'BUY' && act !== 'SELL') {
+        setMsg({ text: 'AI now says HOLD — no setup to place.', color: '#f5b342' })
+        return
+      }
+      if (!sh || sh <= 0) {
+        setMsg({ text: 'AI has no share size for this setup.', color: '#f5b342' })
+        return
+      }
+      await api.post('/orders', {
+        symbol,
+        qty:  sh,
+        side: act === 'BUY' ? 'buy' : 'sell',
+        type: 'market',
+        portfolio_id: pid,
+      })
+      const rr = o?.suggested?.rr
+      setMsg({ text: `Order sent · ${act} ${sh} ${symbol}${rr != null ? ` · R:R ${rr}` : ''}`, color: '#3ddc97' })
+    } catch (e) {
+      setMsg({ text: e?.response?.data?.error || e?.message || 'Order failed', color: '#ff476f' })
+    } finally {
+      setPlacing(false)
+    }
+  }
+
+  function loadWhy() {
+    if (whyLoading) return
+    setWhyLoading(true)
+    api.get('/ai/why/' + symbol, { params: { portfolio_id: pid } })
+      .then(r => {
+        const d = r.data
+        const text = typeof d === 'string' ? d : (d?.reason || d?.why || d?.text || d?.summary || 'No explanation returned.')
+        setWhy(text)
+      })
+      .catch(e => setWhy(e?.response?.data?.error || 'Could not load explanation.'))
+      .finally(() => setWhyLoading(false))
+  }
+
+  const rr = suggested.rr
+
+  return (
+    <div className="ap-card" style={{ marginTop: 2 }}>
+      <div className="ap-card-hd">
+        <div className="ap-dot" style={{ background: acColor }} />
+        AI Setup Actions
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+        <button
+          onClick={useSetup}
+          disabled={!isSetup || placing}
+          title={isSetup ? `Place the AI's suggested ${action.toLowerCase()} order` : 'AI has no actionable setup right now'}
+          style={{
+            flex: 1, padding: '8px 10px', borderRadius: 6,
+            cursor: (isSetup && !placing) ? 'pointer' : 'not-allowed',
+            border: `1px solid ${isSetup ? acColor + '55' : 'var(--hairline-2)'}`,
+            background: isSetup ? `${acColor}18` : 'rgba(10,13,20,0.4)',
+            color: isSetup ? acColor : 'var(--t-3)',
+            fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700, letterSpacing: '0.03em',
+            opacity: placing ? 0.6 : 1, transition: 'all .15s', lineHeight: 1.3,
+          }}
+        >
+          {placing
+            ? 'Placing…'
+            : isSetup
+              ? `Use AI setup · ${action} ${suggested.shares ?? ''}${rr != null ? ` · R:R ${rr}` : ''}`
+              : 'AI: HOLD — no setup'}
+        </button>
+        <button
+          onClick={loadWhy}
+          disabled={whyLoading}
+          title="Ask the AI why it isn't taking this trade"
+          style={{
+            flexShrink: 0, padding: '8px 12px', borderRadius: 6, cursor: whyLoading ? 'wait' : 'pointer',
+            border: '1px solid rgba(179,157,255,0.3)', background: 'rgba(179,157,255,0.1)',
+            color: '#b39dff', fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700,
+          }}
+        >
+          {whyLoading ? '…' : 'Why not?'}
+        </button>
+      </div>
+
+      {msg && (
+        <div style={{
+          marginTop: 8, padding: '6px 9px', borderRadius: 5, fontSize: 10.5, lineHeight: 1.5,
+          background: `${msg.color}12`, border: `1px solid ${msg.color}33`, color: msg.color,
+        }}>
+          {msg.text}
+        </div>
+      )}
+
+      {why && (
+        <div style={{
+          marginTop: 8, padding: '7px 9px', borderRadius: 5, fontSize: 10.5, lineHeight: 1.6,
+          background: 'rgba(140,170,220,0.04)', borderLeft: '2px solid rgba(179,157,255,0.5)', color: 'var(--t-2)',
+        }}>
+          <span style={{ color: '#b39dff', fontWeight: 700 }}>AI: </span>{why}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AnalysisTab({ data, price, symbol, brief, portReg, portfolioId }) {
   if (!data) return <div className="ap-placeholder">Loading indicators…</div>
 
   const macdDiff   = (data.macd_value ?? 0) - (data.macd_signal_value ?? 0)
@@ -1015,6 +1151,7 @@ function AnalysisTab({ data, price, symbol, brief, portReg }) {
       <div style={{ borderTop: '1px solid rgba(140,170,220,0.07)', marginTop: 2 }}>
         <AIThesisPanel data={data} price={price} symbol={symbol} />
       </div>
+      <AISetupActions symbol={symbol} portfolioId={portfolioId} />
     </div>
   )
 }
@@ -1506,7 +1643,7 @@ export default function AnalysisPanel({ symbol, quote, delta, portfolioId }) {
 
       <LiveQuoteBar quote={quote} extQuote={extQuote} secsAgo={secsAgo} />
 
-      {tab === 'analysis' && <AnalysisTab data={data} price={price} symbol={symbol} brief={brief} portReg={portReg} />}
+      {tab === 'analysis' && <AnalysisTab data={data} price={price} symbol={symbol} brief={brief} portReg={portReg} portfolioId={portfolioId} />}
       {tab === 'ai'       && <AIDecisionTab data={data} price={price} />}
       {tab === 'intel'    && <AIIntelTab detail={aiDetail} aiLoading={aiLoading} aiError={aiError} />}
       {tab === 'risk'     && (

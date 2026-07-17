@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import AIStatusChip from './AIStatusChip.jsx'
 
 const pyw = () => window.pywebview?.api
 const win = {
@@ -14,7 +15,7 @@ function MaximizeIcon() { return <svg width="10" height="10" viewBox="0 0 10 10"
 function RestoreIcon()  { return <svg width="10" height="10" viewBox="0 0 10 10"><rect x="0" y="3" width="7" height="7" stroke="currentColor" strokeWidth="1" fill="none"/><polyline points="3,3 3,0 10,0 10,7 7,7" stroke="currentColor" strokeWidth="1" fill="none"/></svg> }
 function CloseIcon()    { return <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg> }
 
-export default function TitleBar({ symbol, account }) {
+export default function TitleBar({ symbol, account, socket, portfolioId }) {
   const [maximized, setMaximized] = useState(false)
   const [time, setTime] = useState('')
 
@@ -51,6 +52,9 @@ export default function TitleBar({ symbol, account }) {
       <span className="tb-sep" style={{ color: 'var(--t-3)' }}>/</span>
       <span className="tb-symbol" style={{ color: 'var(--cy)' }}>{symbol}</span>
       <div className="tb-spacer" />
+      <span className="tb-cluster-item" style={{ WebkitAppRegion: 'no-drag' }}>
+        <AIStatusChip socket={socket} portfolioId={portfolioId} />
+      </span>
       {account && (
         <span className="tb-cluster-item">
           <span className="lbl" style={{ color: 'var(--t-3)' }}>EQUITY</span>

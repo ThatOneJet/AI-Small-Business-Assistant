@@ -51,7 +51,19 @@ function makeTimeFmt(isDaily) {
   }
 }
 
-export default function Chart({ symbol, timeframe, socket, overlays, quote, delta }) {
+// Color-grade an AI score (-10..+10, positive = bullish)
+function aiScoreColor(sc) {
+  const s = Number(sc)
+  if (sc == null || !Number.isFinite(s)) return 'var(--t-4)'
+  if (s >= 6)  return '#3ddc97'
+  if (s >= 3)  return '#5fd39a'
+  if (s >= 1)  return 'var(--t-3)'
+  if (s > -1)  return 'var(--t-4)'
+  if (s > -3)  return '#ff7a94'
+  return '#ff476f'
+}
+
+export default function Chart({ symbol, timeframe, socket, overlays, quote, delta, portfolioId = (typeof localStorage !== 'undefined' && localStorage.getItem('portfolioId')) || '2', onOpenAnalysis }) {
   const mainRef    = useRef()
   const macdRef    = useRef()
   const oscRef     = useRef()
@@ -265,6 +277,91 @@ export default function Chart({ symbol, timeframe, socket, overlays, quote, delt
     return () => socket.off('bar', handler)
   }, [socket, symbol])
 
+  // ── AI overlay: trade markers, level lines, score ribbon ─────────────────────
+  const aiLinesRef = useRef([])
+  const markersRef = useRef([])
+  const [opinion, setOpinion] = useState(null)
+
+  // Refetch this portfolio's AI log and paint trade markers on the candle series.
+  const fetchMarkers = useCallback(() => {
+    api.get(`/portfolios/${portfolioId}/ai/log`).then(r => {
+      const rows = Array.isArray(r.data) ? r.data : []
+      const markers = rows
+        .filter(row => row.symbol === symbol)
+        .map(row => {
+          const act = String(row.action || '').toUpperCase()
+          const up  = act === 'BUY' || act === 'COVER'
+          const t   = Math.floor(new Date(String(row.created_at).replace(' ', 'T') + 'Z').getTime() / 1000)
+          const sc  = Number(row.score)
+          return {
+            time: t,
+            position: up ? 'belowBar' : 'aboveBar',
+            color:    up ? '#3ddc97' : '#ff476f',
+            shape:    up ? 'arrowUp' : 'arrowDown',
+            text:     Number.isFinite(sc) ? (sc >= 0 ? '+' : '') + sc.toFixed(1) : '',
+          }
+        })
+        .filter(m => Number.isFinite(m.time))
+        .sort((a, b) => a.time - b.time)
+      markersRef.current = markers
+      candleRef.current?.setMarkers(markers) // guard: candle may be nulled during rebuild
+    }).catch(() => {})
+  }, [symbol, portfolioId])
+
+  // (Re)draw AI entry/stop/target price lines from an opinion payload.
+  const drawAiLevels = useCallback((op) => {
+    const cv = candleRef.current
+    if (!cv) return
+    aiLinesRef.current.forEach(l => { try { cv.removePriceLine(l) } catch {} })
+    aiLinesRef.current = []
+    const s = op?.suggested
+    if (!s) return
+    const addLine = (price, color, lineStyle, title) => {
+      const p = Number(price)
+      if (price == null || !Number.isFinite(p)) return
+      try {
+        aiLinesRef.current.push(cv.createPriceLine({
+          price: p, color, lineStyle, lineWidth: 1, title, axisLabelVisible: true,
+        }))
+      } catch {}
+    }
+    addLine(s.entry,  '#b39dff', 0, 'AI Entry')
+    addLine(s.stop,   '#ff476f', 2, 'AI Stop')
+    addLine(s.target, '#3ddc97', 2, 'AI Target')
+  }, [])
+
+  // Fetch markers + opinion on symbol / portfolio change; clean up lines on unmount.
+  useEffect(() => {
+    let cancelled = false
+    fetchMarkers()
+    api.get('/ai/opinion/' + symbol, { params: { portfolio_id: portfolioId } }).then(r => {
+      if (cancelled) return
+      setOpinion(r.data)
+      drawAiLevels(r.data)
+    }).catch(() => { if (!cancelled) { setOpinion(null); drawAiLevels(null) } })
+    return () => {
+      cancelled = true
+      const cv = candleRef.current
+      aiLinesRef.current.forEach(l => { try { cv?.removePriceLine(l) } catch {} })
+      aiLinesRef.current = []
+    }
+  }, [symbol, portfolioId, fetchMarkers, drawAiLevels])
+
+  // Live: when the AI trades this symbol, refetch markers + opinion.
+  useEffect(() => {
+    if (!socket) return
+    const handler = (h) => {
+      if (!h || h.symbol !== symbol) return
+      fetchMarkers()
+      api.get('/ai/opinion/' + symbol, { params: { portfolio_id: portfolioId } }).then(r => {
+        setOpinion(r.data)
+        drawAiLevels(r.data)
+      }).catch(() => {})
+    }
+    socket.on('ai_trade', handler)
+    return () => socket.off('ai_trade', handler)
+  }, [socket, symbol, portfolioId, fetchMarkers, drawAiLevels])
+
   // ── Overlays + indicator data ────────────────────────────────────────────────
   useEffect(() => {
     const mainChart = mainChartRef.current
@@ -416,6 +513,12 @@ export default function Chart({ symbol, timeframe, socket, overlays, quote, delt
     }
   }, [handleKeyDown, handleKeyUp])
 
+  const aiScore    = opinion?.score
+  const aiColor    = aiScoreColor(aiScore)
+  const aiPillText = (opinion == null || !Number.isFinite(Number(aiScore)))
+    ? 'AI —'
+    : `AI ${Number(aiScore) >= 0 ? '+' : ''}${Number(aiScore).toFixed(1)} · ${opinion.action || '—'} · ${opinion.confidence != null ? Math.round(opinion.confidence) : '—'}%`
+
   return (
     <div className="chart-stack">
       <div
@@ -464,6 +567,22 @@ export default function Chart({ symbol, timeframe, socket, overlays, quote, delt
       >
         <div ref={mainRef} className="chart-main" />
         <div ref={tooltipEl} className="chart-tooltip" />
+
+        {/* AI score ribbon */}
+        <div
+          onClick={(e) => { e.stopPropagation(); if (onOpenAnalysis) onOpenAnalysis(symbol) }}
+          title="Open AI analysis"
+          style={{
+            position: 'absolute', top: 8, left: 8, zIndex: 5,
+            fontFamily: 'var(--font-mono)', fontSize: 10, lineHeight: 1.4,
+            padding: '2px 6px', borderRadius: 4, whiteSpace: 'nowrap',
+            letterSpacing: '0.03em', color: aiColor,
+            background: 'rgba(14,19,32,0.85)', border: `1px solid ${aiColor}`,
+            pointerEvents: 'auto', cursor: 'pointer',
+          }}
+        >
+          {aiPillText}
+        </div>
 
         {/* Drag selection overlay */}
         {dragState && (
