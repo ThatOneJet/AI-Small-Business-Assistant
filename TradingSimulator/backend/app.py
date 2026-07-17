@@ -1138,6 +1138,7 @@ def _ai_status_payload(pid=None):
         'ai_online': True, 'online': True, 'model': 'trading_model (retrainable)',
         'model_ready': st['model_ready'], 'real_samples': st['real_samples'],
         'scanning': bool(globals().get('_AI_SCANNING', False)),
+        'retraining': bool(globals().get('_retrain_state', {}).get('running', False)),
         'universe_size': universe_size,
         'next_scan_secs': globals().get('_AI_INTERVAL', 60),
         'positions_held': positions_held,
@@ -1359,22 +1360,121 @@ def ai_why(symbol):
     })
 
 
+_retrain_state = {'running': False, 'started_at': 0.0, 'last_result': None}
+
 @app.route('/api/ai/model/retrain', methods=['POST'])
 def ai_model_retrain():
-    """Retrain the trading model: synthetic TA prior + all accumulated closed-trade
-    outcomes the simulator has logged. This is how the model self-improves."""
+    """Retrain BOTH model heads (directional score + regime classifier) on the big
+    synthetic prior plus all accumulated closed-trade outcomes. This is a HEAVY job
+    (~1-2 min on the Jetson), so it runs in the background and returns immediately —
+    poll /api/ai/status ('retraining' flag + 'real_samples') to see it finish."""
     import trading_model
-    try:
-        # Training is CPU-bound (blocks the eventlet hub). Offload it to a real
-        # OS thread pool so websockets / other requests keep flowing meanwhile.
+    if _retrain_state['running']:
+        return jsonify({'ok': True, 'status': 'already_running',
+                        'real_samples': trading_model.model_status().get('real_samples')})
+
+    def _bg():
+        _retrain_state.update(running=True, started_at=_time.time())
         try:
-            import eventlet.tpool
-            result = eventlet.tpool.execute(trading_model.train)
-        except Exception:
-            result = trading_model.train()
-        return jsonify({'ok': True, **result})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+            _retrain_state['last_result'] = trading_model.train()
+            print('[AI] model retrain complete:', _retrain_state['last_result'], flush=True)
+        except Exception as e:
+            _retrain_state['last_result'] = {'error': str(e)}
+            print('[AI] model retrain FAILED:', e, flush=True)
+        finally:
+            _retrain_state['running'] = False
+
+    threading.Thread(target=_bg, daemon=True, name='model-retrain').start()
+    return jsonify({'ok': True, 'status': 'started',
+                    'note': 'Retraining both heads in the background (~1-2 min). '
+                            'The sample count updates when it finishes.',
+                    'real_samples': trading_model.model_status().get('real_samples')})
+
+
+_OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://127.0.0.1:11434')
+_CHAT_MODEL = os.getenv('TRADESIM_CHAT_MODEL', 'qwen2.5:3b')
+
+
+def _ai_chat_llm(system, user, timeout=90):
+    """Ask the local Ollama chat model. Returns the text, or None if offline/error."""
+    try:
+        import urllib.request
+        payload = _json.dumps({
+            'model': _CHAT_MODEL,
+            'messages': [{'role': 'system', 'content': system},
+                         {'role': 'user', 'content': user}],
+            'stream': False, 'keep_alive': '30m',
+            'options': {'temperature': 0.4, 'num_predict': 300},
+        }).encode()
+        req = urllib.request.Request(_OLLAMA_URL + '/api/chat', data=payload,
+                                     headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = _json.load(r)
+        return ((d.get('message') or {}).get('content') or '').strip() or None
+    except Exception:
+        return None
+
+
+@app.route('/api/ai/chat', methods=['POST'])
+def ai_chat():
+    """Chat with the trading AI about ITS OWN decisions. Grounds a local LLM on the
+    model's real read of the symbol + recent decisions + portfolio, so the answers
+    explain the actual reasoning (not generic advice). Falls back to a data summary
+    when Ollama is offline."""
+    body = request.get_json(silent=True) or {}
+    question = (body.get('question') or '').strip()
+    symbol   = ((body.get('symbol') or '').upper()) or None
+    pid      = body.get('portfolio_id') or 1
+    if not question:
+        return jsonify({'answer': "Ask me why I made a call — e.g. \"why are you holding NVDA?\""})
+
+    ctx = []
+    if symbol:
+        try:
+            data = _compute_indicators_fast(symbol); data['symbol'] = symbol
+            detail = _ai_score_detailed(data)
+            conf = _compute_confidence(detail['score'], data, detail)
+            drivers = '; '.join(
+                f"{r['signal']} {r['value']} ({'+' if r['contribution'] > 0 else ''}{r['contribution']})"
+                for r in (detail.get('reasoning') or [])[:6])
+            act = 'BUY' if detail['score'] >= _OPINION_BUY else 'SELL' if detail['score'] <= _OPINION_SELL else 'HOLD'
+            ctx.append(f"MY CURRENT READ on {symbol}: score {detail['score']:+.1f}/10 (>=+5 = buy), "
+                       f"confidence {conf}%, regime '{detail['market_state']}', price ${data.get('last_price')}. "
+                       f"Stance: {act}. Top drivers: {drivers}. Note: {detail.get('summary', '')}")
+        except Exception as e:
+            ctx.append(f"No live read on {symbol} ({e}).")
+    try:
+        with _get_db() as conn:
+            if symbol:
+                logs = conn.execute('SELECT symbol,action,score,price,reason FROM ai_log WHERE portfolio_id=? AND symbol=? ORDER BY id DESC LIMIT 6', (pid, symbol)).fetchall()
+            else:
+                logs = conn.execute('SELECT symbol,action,score,price,reason FROM ai_log WHERE portfolio_id=? ORDER BY id DESC LIMIT 8', (pid,)).fetchall()
+        if logs:
+            ctx.append('MY RECENT DECISIONS: ' + ' | '.join(
+                f"{l['action']} {l['symbol']} @${(l['price'] or 0):.2f} (score {(l['score'] or 0):+.1f}): {(l['reason'] or '')[:55]}" for l in logs))
+    except Exception:
+        pass
+    try:
+        st = _sim_state(pid)
+        held = [p for p in _sim_positions_with_prices(pid) if p.get('shares')]
+        ctx.append(f"PORTFOLIO: cash ${st.get('cash', 0):,.0f}, {len(held)} open positions" +
+                   ((': ' + ', '.join(f"{p['symbol']}({p.get('shares')})" for p in held[:8])) if held else '.'))
+    except Exception:
+        pass
+    context = '\n'.join(ctx) or 'No decision data available yet.'
+
+    system = ("You ARE TradingSim's autonomous trading AI, explaining your own decisions to the trader. "
+              "You score each symbol from -10 (very bearish) to +10 (very bullish) using technical signals "
+              "(RSI, MACD, trend/ADX, Bollinger, VWAP, volume, ATR) and only BUY above +5.0. When markets are "
+              "closed you trade crypto & forex. Answer in FIRST PERSON ('I'm holding NVDA because...'), using "
+              "ONLY the DATA below. Be concise (<130 words), specific, cite the actual scores/signals/numbers, "
+              "and never invent figures. If the data doesn't cover the question, say so briefly.")
+    user = f"DATA:\n{context}\n\nTRADER'S QUESTION: {question}"
+    ans = _ai_chat_llm(system, user)
+    used_llm = bool(ans)
+    if not ans:
+        ans = "My local chat model is offline right now, so here's my current data directly:\n\n" + context
+    return jsonify({'answer': ans, 'grounded_on': symbol or 'portfolio', 'llm_used': used_llm})
 
 
 @app.route('/api/portfolios/<int:pid>/ai/scan/suggestions')
@@ -4155,7 +4255,16 @@ def _ai_score_detailed(data: dict) -> dict:
     """
     import trading_model
     _symbol = data.get('symbol', '') or ''
+    # MODEL-based market-state categorization (trained classifier) — the AI now
+    # categorizes what it sees instead of the old hand-written rule thresholds. Falls
+    # back to the rule-based classifier if the model is unavailable.
     _market_state = _classify_market_state(data)
+    try:
+        _rc = trading_model.classify_regime(data)
+        if _rc and _rc.get('regime') and _rc['regime'] != 'neutral':
+            _market_state = _rc['regime']
+    except Exception:
+        pass
     _expl = trading_model.explain(data)                  # score + per-signal contributions
     _score = _expl['score']
     _reasons = _expl['reasons']

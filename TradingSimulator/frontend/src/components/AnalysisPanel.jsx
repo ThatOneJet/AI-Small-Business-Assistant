@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import api from '../api.js'
 import { computeDecision } from '../utils/tradeDecision.js'
 import AIThesisPanel from './AIThesisPanel.jsx'
+import AIChatPanel from './AIChatPanel.jsx'
 import RiskPanel from './RiskPanel'
 
 function RiskPanelInline({ symbol, portfolioId, price }) {
@@ -1164,11 +1165,46 @@ const ACTION_CFG = {
   HOLD: { grad: 'linear-gradient(140deg, rgba(245,179,66,0.14), rgba(245,179,66,0.03))',  color: '#f5b342', border: 'rgba(245,179,66,0.30)',  glow: '0 0 28px rgba(245,179,66,0.18)' },
 }
 
-function AIDecisionTab({ data, price }) {
-  const dec = computeDecision(data, price)
+function AIDecisionTab({ data, price, symbol, portfolioId }) {
+  // Single source of truth: this tab now shows the REAL backend model's decision
+  // (same /api/ai/opinion the chart ribbon, signal strip and scanner use), not the
+  // old client-side heuristic. Falls back to the heuristic only until the read loads.
+  const [op, setOp] = useState(null)
+  useEffect(() => {
+    if (!symbol) return
+    let cancelled = false
+    const pid = portfolioId || localStorage.getItem('portfolioId') || '2'
+    const load = () => api.get('/ai/opinion/' + symbol, { params: { portfolio_id: pid } })
+      .then(r => { if (!cancelled) setOp(r.data) }).catch(() => {})
+    load()
+    const id = setInterval(load, 15000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [symbol, portfolioId])
 
   if (!data || !price)
     return <div className="ap-placeholder">Waiting for live price data…</div>
+
+  let dec
+  if (op && !op.error && op.suggested) {
+    const entry = op.suggested.entry ?? op.price ?? price
+    const stop = op.suggested.stop, target = op.suggested.target
+    const reasons = op.reasoning || []
+    const toSig = r => ({ t: `${r.signal} ${r.value} (${r.contribution > 0 ? '+' : ''}${r.contribution})` })
+    dec = {
+      action: op.action || 'HOLD',
+      confidence: op.confidence ?? 0,
+      score: Math.round((op.score ?? 0) * 10) / 10,
+      price: entry, stopLoss: stop, target,
+      riskDist: Math.abs(entry - stop), rewardDist: Math.abs(target - entry),
+      rr: op.suggested.rr != null ? Number(op.suggested.rr).toFixed(2) : '—',
+      bulls: reasons.filter(r => r.contribution > 0).map(toSig),
+      bears: reasons.filter(r => r.contribution < 0).map(toSig),
+      neutrals: [],
+      summary: op.summary || '',
+    }
+  } else {
+    dec = computeDecision(data, price)   // fallback until the model read arrives
+  }
   if (!dec)
     return <div className="ap-placeholder">Insufficient data for analysis.</div>
 
@@ -1256,7 +1292,7 @@ function AIDecisionTab({ data, price }) {
         </div>
 
         <div className="ai-atr-note" style={{ borderColor: cfg.border }}>
-          Stop = 1.5× ATR (${f(data.atr)}) &nbsp;·&nbsp; Target = 2.5× ATR
+          Stop &amp; target: regime-adjusted ATR bands (ATR ${f(data.atr)})
         </div>
       </div>
 
@@ -1306,9 +1342,12 @@ function AIDecisionTab({ data, price }) {
         )}
 
         <div className="ai-disclaimer">
-          ⚠ Rule-based analysis only — not financial advice.
+          ⚠ Live model analysis — not financial advice.
         </div>
       </div>
+
+      {/* Ask the model why it made this call */}
+      <AIChatPanel symbol={symbol} portfolioId={portfolioId} />
 
     </div>
   )
@@ -1644,7 +1683,7 @@ export default function AnalysisPanel({ symbol, quote, delta, portfolioId }) {
       <LiveQuoteBar quote={quote} extQuote={extQuote} secsAgo={secsAgo} />
 
       {tab === 'analysis' && <AnalysisTab data={data} price={price} symbol={symbol} brief={brief} portReg={portReg} portfolioId={portfolioId} />}
-      {tab === 'ai'       && <AIDecisionTab data={data} price={price} />}
+      {tab === 'ai'       && <AIDecisionTab data={data} price={price} symbol={symbol} portfolioId={portfolioId} />}
       {tab === 'intel'    && <AIIntelTab detail={aiDetail} aiLoading={aiLoading} aiError={aiError} />}
       {tab === 'risk'     && (
         <div className="ap-content">

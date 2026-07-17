@@ -197,9 +197,29 @@ _REGIMES = ["strong_uptrend", "uptrend", "range", "downtrend", "strong_downtrend
             "high_volatility", "breakout_up", "breakout_down",
             "reversal_bottom", "reversal_top"]
 
+# Map the fine-grained training regimes to the runtime market-state vocabulary the
+# rest of the app understands (so the MODEL categorizes the market instead of the old
+# rule-based classifier).
+_MARKET_STATE = {
+    "strong_uptrend": "trending_up",   "uptrend": "trending_up",
+    "range": "ranging",
+    "downtrend": "trending_down",      "strong_downtrend": "trending_down",
+    "high_volatility": "high_volatility",
+    "breakout_up": "breakout",         "breakout_down": "breakout",
+    "reversal_bottom": "accumulation", "reversal_top": "distribution",
+}
 
-def _sample_regime(rng, regime):
-    """Draw a realistic, internally-correlated indicator dict for a given regime."""
+# The market is frequently closed (equities), so the bot trades CRYPTO and FOREX. Train
+# on all three by flavoring each sample's volatility: crypto swings much wider, forex
+# much tighter. Equity is weighted 2x (still the primary catalog). The TA patterns are
+# the same across classes — only the ATR/volume scale differs, which the model learns.
+_ASSET_CLASSES = ["equity", "equity", "crypto", "forex"]
+_ATR_SCALE      = {"equity": 1.0, "crypto": 2.6, "forex": 0.35}
+
+
+def _sample_regime(rng, regime, asset_class="equity"):
+    """Draw a realistic, internally-correlated indicator dict for a given regime,
+    flavored for the asset class (crypto wider, forex tighter volatility)."""
     price = 100.0
     def macd_pair(bullish, strength):     # (macd_value, macd_signal_value)
         base = strength * (1 if bullish else -1)
@@ -278,6 +298,13 @@ def _sample_regime(rng, regime):
 
     atr_pct = {"high_volatility": rng.uniform(3.5, 8.0), "breakout_up": rng.uniform(2.0, 5.0),
                "breakout_down": rng.uniform(2.0, 5.0)}.get(regime, rng.uniform(0.5, 3.5))
+    # Asset-class volatility flavor — teach the model the same patterns at crypto and
+    # forex scales, not just equities.
+    atr_pct *= _ATR_SCALE.get(asset_class, 1.0)
+    if asset_class == "crypto":
+        vr *= rng.uniform(1.0, 1.5)      # crypto volume spikes harder
+    elif asset_class == "forex":
+        vr *= rng.uniform(0.7, 1.1)
 
     return {
         "rsi": rsi, "stoch_k_val": stoch, "volume_ratio": vr, "slope_pct": slope,
@@ -291,20 +318,26 @@ def _sample_regime(rng, regime):
 _TREND_KEYS = ["strong_up", "up", "mild_up", "neutral", "mild_down", "down", "strong_down"]
 
 
-def _synth_dataset(n=16000, seed=42):
+def _synth_dataset(n=45000, seed=42):
+    """Big regime- AND asset-class-aware synthetic set. Returns (X, y, regimes) where
+    regimes are runtime market-state labels — used to train the regime classifier."""
     rng = random.Random(seed)
-    X, y = [], []
+    X, y, R = [], [], []
     for _ in range(n):
         regime = rng.choice(_REGIMES)
-        data = _sample_regime(rng, regime)
+        ac     = rng.choice(_ASSET_CLASSES)
+        data   = _sample_regime(rng, regime, ac)
         f = featurize(data)
         X.append(f)
         y.append(_clip(_heuristic_score(f) + rng.gauss(0, 0.7)))
-    return np.array(X, float), np.array(y, float)
+        R.append(_MARKET_STATE[regime])
+    return np.array(X, float), np.array(y, float), R
 
 
 # ── The model ─────────────────────────────────────────────────────────────────
 _model = None
+_regime_model = None
+REGIME_PATH = os.path.join(_HERE, "regime_model.joblib")
 
 
 def _load_real_samples():
@@ -335,8 +368,12 @@ def add_training_row(features, target):
 
 
 def train(save=True):
-    """(Re)train: regime-aware synthetic TA prior + all real closed-trade outcomes."""
-    Xs, ys = _synth_dataset()
+    """(Re)train BOTH heads on a big regime + asset-class synthetic set plus all real
+    closed-trade outcomes: (1) the directional score regressor, and (2) a regime
+    CLASSIFIER that categorizes the market from the same features — this replaces the
+    old hand-written rule-based market-state classifier."""
+    from sklearn.ensemble import RandomForestClassifier
+    Xs, ys, Rs = _synth_dataset()
     Xr, yr = _load_real_samples()
     if Xr:
         # weight real outcomes more heavily by duplicating them (few but ground-truth)
@@ -346,15 +383,56 @@ def train(save=True):
         y = np.concatenate([ys] + [yr_arr] * reps)
     else:
         X, y = Xs, ys
-    m = GradientBoostingRegressor(n_estimators=200, max_depth=4,
-                                  learning_rate=0.07, subsample=0.85, random_state=0)
+    # (1) Directional score — deeper/more trees for the larger, richer dataset.
+    m = GradientBoostingRegressor(n_estimators=320, max_depth=4,
+                                  learning_rate=0.06, subsample=0.85, random_state=0)
     m.fit(X, y)
+    # (2) Regime classifier (multiclass) on the synthetic (features -> market_state)
+    # pairs. Real closed-trade rows carry no regime label, so it trains on Xs/Rs.
+    rc = RandomForestClassifier(n_estimators=240, max_depth=16, min_samples_leaf=2,
+                                n_jobs=-1, random_state=0)
+    rc.fit(Xs, Rs)
     if save:
         joblib.dump(m, MODEL_PATH)
-    global _model
+        joblib.dump(rc, REGIME_PATH)
+    global _model, _regime_model
     _model = m
+    _regime_model = rc
     return {"trained": True, "synthetic_samples": len(Xs), "real_samples": len(Xr),
-            "features": len(FEATURES)}
+            "features": len(FEATURES), "regime_classes": sorted(set(Rs))}
+
+
+def load_regime():
+    """Lazy-load the regime classifier (train if missing)."""
+    global _regime_model
+    if _regime_model is not None:
+        return _regime_model
+    if os.path.exists(REGIME_PATH):
+        try:
+            _regime_model = joblib.load(REGIME_PATH)
+        except Exception:
+            train()
+    else:
+        train()
+    return _regime_model
+
+
+def classify_regime(data):
+    """MODEL-based market-state categorization (replaces the rule-based classifier).
+    Returns {regime, confidence(0-1)}. Falls back to 'neutral' if unavailable."""
+    try:
+        rc = load_regime()
+        if rc is None:
+            return {"regime": "neutral", "confidence": 0.0}
+        f = np.array([featurize(data)], float)
+        pred = str(rc.predict(f)[0])
+        try:
+            conf = float(max(rc.predict_proba(f)[0]))
+        except Exception:
+            conf = 0.0
+        return {"regime": pred, "confidence": round(conf, 3)}
+    except Exception:
+        return {"regime": "neutral", "confidence": 0.0}
 
 
 def load():
